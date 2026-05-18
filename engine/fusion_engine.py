@@ -60,6 +60,68 @@ def build_decision_blocks(
     }
 
 
+def _failed_blocks(blocks):
+    return [name for name, passed in blocks.items() if not passed]
+
+
+def _quality_score(pass_count, fusion_score, danger_score, risk_penalty):
+    score = 0
+
+    score += pass_count * 8
+    score += max(0, min(100, fusion_score)) * 0.35
+
+    if danger_score >= 60:
+        score -= 30
+    elif danger_score >= 30:
+        score -= 15
+    else:
+        score += 5
+
+    score += risk_penalty
+
+    return max(0, min(100, round(score, 2)))
+
+
+def _detect_trade_mode(final_confidence, danger_score, session_score, volatility_score, risk_penalty):
+    """
+    Basic trade mode classification.
+    Later this can become user configurable.
+    """
+
+    if danger_score >= 60 or risk_penalty <= -35:
+        return "blocked"
+
+    if final_confidence >= 85 and danger_score <= 25 and risk_penalty >= -15:
+        return "scalp"
+
+    if final_confidence >= 70 and danger_score <= 35:
+        return "intraday"
+
+    if final_confidence >= 55 and danger_score <= 25 and session_score >= 0:
+        return "safe"
+
+    return "no_trade"
+
+
+def _grade_signal(direction, quality_score, pass_count, final_confidence, danger_score, risk_penalty):
+    if danger_score >= 60 or risk_penalty <= -40:
+        return "WAIT"
+
+    if direction == "BUY":
+        if quality_score >= 82 and pass_count >= 9 and final_confidence >= 75:
+            return "Strong BUY"
+        if quality_score >= 62 and pass_count >= 7 and final_confidence >= 55:
+            return "Weak BUY"
+
+    if direction == "SELL":
+        if quality_score >= 82 and pass_count >= 9 and final_confidence >= 75:
+            return "Strong SELL"
+        if quality_score >= 62 and pass_count >= 7 and final_confidence >= 55:
+            return "Weak SELL"
+
+    return "WAIT"
+
+
 def fuse_decision(
     trend_score,
     momentum_score,
@@ -74,9 +136,20 @@ def fuse_decision(
     decision_blocks
 ):
     """
-    QuantBado Decision Fusion Engine v0.1
+    QuantBado Decision Fusion Engine v0.2
 
-    Combines all engine scores and decision blocks into one final market decision.
+    Combines all engine scores and decision blocks into a final market decision.
+
+    v0.2 adds:
+    - signal_grade
+    - trade_mode
+    - buy_quality_score
+    - sell_quality_score
+    - direction_bias
+    - blocked_reasons
+
+    Compatibility:
+    - final_signal still returns BUY / SELL / WAIT for market_reader.py
     """
 
     danger_penalty = -abs(danger_score)
@@ -102,33 +175,109 @@ def fuse_decision(
     buy_blocks = decision_blocks.get("buy_blocks", {})
     sell_blocks = decision_blocks.get("sell_blocks", {})
 
+    buy_quality_score = _quality_score(
+        pass_count=buy_pass_count,
+        fusion_score=fusion_score,
+        danger_score=danger_score,
+        risk_penalty=risk_penalty
+    )
+
+    sell_quality_score = _quality_score(
+        pass_count=sell_pass_count,
+        fusion_score=fusion_score,
+        danger_score=danger_score,
+        risk_penalty=risk_penalty
+    )
+
+    blocked_reasons = []
+
+    if not buy_blocks.get("danger_ok", True) or not sell_blocks.get("danger_ok", True):
+        blocked_reasons.append("High market danger")
+
+    if not buy_blocks.get("not_dead_market", True) or not sell_blocks.get("not_dead_market", True):
+        blocked_reasons.append("Dead market")
+
+    if not buy_blocks.get("session_ok", True) or not sell_blocks.get("session_ok", True):
+        blocked_reasons.append("Low activity session")
+
+    if risk_penalty <= -35:
+        blocked_reasons.append("Risk penalty too high")
+
+    if buy_quality_score > sell_quality_score + 8:
+        direction_bias = "buy"
+    elif sell_quality_score > buy_quality_score + 8:
+        direction_bias = "sell"
+    else:
+        direction_bias = "neutral"
+
     final_signal = "WAIT"
     final_risk = "high"
     reason_parts = []
 
-    if buy_pass_count >= 9 and fusion_score >= 80:
+    buy_grade = _grade_signal(
+        direction="BUY",
+        quality_score=buy_quality_score,
+        pass_count=buy_pass_count,
+        final_confidence=final_confidence,
+        danger_score=danger_score,
+        risk_penalty=risk_penalty
+    )
+
+    sell_grade = _grade_signal(
+        direction="SELL",
+        quality_score=sell_quality_score,
+        pass_count=sell_pass_count,
+        final_confidence=final_confidence,
+        danger_score=danger_score,
+        risk_penalty=risk_penalty
+    )
+
+    signal_grade = "WAIT"
+
+    if blocked_reasons:
+        final_signal = "WAIT"
+        signal_grade = "WAIT"
+        final_risk = "high"
+        reason_parts.append("Trade blocked: " + ", ".join(blocked_reasons))
+
+    elif buy_grade in ["Strong BUY", "Weak BUY"] and buy_quality_score >= sell_quality_score:
+        signal_grade = buy_grade
         final_signal = "BUY"
-        final_risk = "medium"
-        reason_parts.append("BUY decision passed enough fusion blocks with strong score")
-    elif sell_pass_count >= 9 and fusion_score >= 80:
+        reason_parts.append(
+            f"{signal_grade} confirmed by fusion quality score"
+        )
+
+    elif sell_grade in ["Strong SELL", "Weak SELL"] and sell_quality_score > buy_quality_score:
+        signal_grade = sell_grade
         final_signal = "SELL"
-        final_risk = "medium"
-        reason_parts.append("SELL decision passed enough fusion blocks with strong score")
+        reason_parts.append(
+            f"{signal_grade} confirmed by fusion quality score"
+        )
+
     else:
         final_signal = "WAIT"
+        signal_grade = "WAIT"
         reason_parts.append("Fusion engine did not confirm enough aligned conditions")
 
-    if not buy_blocks.get("danger_ok", True) or not sell_blocks.get("danger_ok", True):
-        final_signal = "WAIT"
-        final_risk = "high"
-        reason_parts.append("High market danger blocks trade entry")
+    trade_mode = _detect_trade_mode(
+        final_confidence=final_confidence,
+        danger_score=danger_score,
+        session_score=session_score,
+        volatility_score=volatility_score,
+        risk_penalty=risk_penalty
+    )
 
-    if final_confidence >= 75 and final_risk != "high":
+    if final_signal == "WAIT":
+        final_risk = "high"
+    elif final_confidence >= 75 and danger_score <= 25 and risk_penalty >= -20:
         final_risk = "low"
-    elif final_confidence >= 55 and final_risk != "high":
+    elif final_confidence >= 55 and danger_score <= 40:
         final_risk = "medium"
     else:
         final_risk = "high"
+
+    buy_failed_blocks = _failed_blocks(buy_blocks)
+    sell_failed_blocks = _failed_blocks(sell_blocks)
 
     return {
         "final_signal": final_signal,
@@ -137,5 +286,15 @@ def fuse_decision(
         "fusion_score": round(fusion_score, 2),
         "fusion_reason": " | ".join(reason_parts),
         "decision_blocks": decision_blocks,
-        "danger_penalty": danger_penalty
+        "danger_penalty": danger_penalty,
+
+        "signal_grade": signal_grade,
+        "trade_mode": trade_mode,
+        "buy_quality_score": buy_quality_score,
+        "sell_quality_score": sell_quality_score,
+        "direction_bias": direction_bias,
+        "blocked_reasons": blocked_reasons,
+        "buy_failed_blocks": buy_failed_blocks,
+        "sell_failed_blocks": sell_failed_blocks,
+        "fusion_version": "fusion_engine_v0.2"
     }

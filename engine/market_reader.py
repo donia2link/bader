@@ -1,4 +1,3 @@
-
 from market_structure_engine import analyze_structure
 from momentum_engine import analyze_momentum
 from liquidity_engine import analyze_liquidity
@@ -14,9 +13,9 @@ from signal_store import get_active_signal, save_active_signal, update_active_si
 
 def analyze_market(symbol, timeframe, candles, user_key="unknown"):
     """
-    QuantBado Market Reader v1.4
-    Persistent Signal Store integration.
-    Active signals are kept stable until TP Hit / SL Hit / Expired.
+    QuantBado Market Reader v1.5
+    Adds explicit Fusion Engine v0.2 fields to the response.
+    Persistent Signal Store remains active.
     """
 
     if not candles or len(candles) < 40:
@@ -46,6 +45,17 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
             "regime_score": 0,
             "danger_level": "unknown",
             "danger_score": 0,
+
+            "signal_grade": "WAIT",
+            "trade_mode": "no_trade",
+            "buy_quality_score": 0,
+            "sell_quality_score": 0,
+            "direction_bias": "neutral",
+            "blocked_reasons": ["Not enough candles"],
+            "buy_failed_blocks": [],
+            "sell_failed_blocks": [],
+            "fusion_version": "fusion_engine_v0.2",
+
             "entry": 0,
             "sl": 0,
             "tp1": 0,
@@ -75,8 +85,8 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
                 "danger": 0,
                 "risk": -20
             },
-            "strategy_version": "market_reader_v1.4",
-            "notes": "Market reader v1.4"
+            "strategy_version": "market_reader_v1.5",
+            "notes": "Market reader v1.5"
         }
 
     closes = [float(c["close"]) for c in candles]
@@ -239,7 +249,15 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
     fusion_reason = fusion_result.get("fusion_reason", "")
     danger_penalty = fusion_result.get("danger_penalty", -abs(danger_score))
 
-    
+    signal_grade = fusion_result.get("signal_grade", "WAIT")
+    trade_mode = fusion_result.get("trade_mode", "no_trade")
+    buy_quality_score = fusion_result.get("buy_quality_score", 0)
+    sell_quality_score = fusion_result.get("sell_quality_score", 0)
+    direction_bias = fusion_result.get("direction_bias", "neutral")
+    blocked_reasons = fusion_result.get("blocked_reasons", [])
+    buy_failed_blocks = fusion_result.get("buy_failed_blocks", [])
+    sell_failed_blocks = fusion_result.get("sell_failed_blocks", [])
+    fusion_version = fusion_result.get("fusion_version", "fusion_engine_v0.2")
 
     reason = fusion_reason
     if signal == "WAIT" and not smart_no_trade_reason:
@@ -393,6 +411,16 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
         "fusion_reason": fusion_reason,
         "decision_blocks": decision_blocks,
 
+        "signal_grade": signal_grade,
+        "trade_mode": trade_mode,
+        "buy_quality_score": buy_quality_score,
+        "sell_quality_score": sell_quality_score,
+        "direction_bias": direction_bias,
+        "blocked_reasons": blocked_reasons,
+        "buy_failed_blocks": buy_failed_blocks,
+        "sell_failed_blocks": sell_failed_blocks,
+        "fusion_version": fusion_version,
+
         "signal_lifecycle": lifecycle,
 
         "entry": round(entry, 5),
@@ -415,6 +443,6 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
             "danger": danger_penalty,
             "risk": risk_penalty
         },
-        "strategy_version": "market_reader_v1.4",
-        "notes": "Market reader v1.4"
+        "strategy_version": "market_reader_v1.5",
+        "notes": "Market reader v1.5"
     }
