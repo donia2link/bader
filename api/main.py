@@ -26,7 +26,7 @@ from performance_engine import build_performance_summary
 
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="1.9.0"
+    version="2.0.0"
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -35,7 +35,7 @@ USERS_FILE = BASE_DIR / "users" / "users.json"
 LOGS_DIR = BASE_DIR / "logs"
 MARKET_LOG_FILE = LOGS_DIR / "market_logs.jsonl"
 
-FINAL_STATUSES = ["TP Hit", "SL Hit", "Expired"]
+FINAL_STATUSES = ["TP Hit", "TP1 Hit", "TP2 Hit", "TP3 Hit", "SL Hit", "Expired"]
 
 
 class Candle(BaseModel):
@@ -77,7 +77,7 @@ class ForceCloseSignalRequest(BaseModel):
     user_key: str = Field(..., min_length=3)
     symbol: str
     timeframe: str
-    status: str = "TP Hit"
+    status: str = "TP1 Hit"
 
 
 def load_settings():
@@ -131,7 +131,7 @@ def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "1.9.0",
+        "version": "2.0.0",
         "time_utc": utc_now_iso()
     }
 
@@ -141,7 +141,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "1.9.0",
+        "version": "2.0.0",
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -269,7 +269,7 @@ def admin_force_close_signal(data: ForceCloseSignalRequest):
         return {
             "status": "error",
             "code": "INVALID_FINAL_STATUS",
-            "message": "status must be one of: TP Hit, SL Hit, Expired",
+            "message": "status must be one of: TP1 Hit, TP2 Hit, TP3 Hit, SL Hit, Expired",
             "server_time_utc": utc_now_iso()
         }
 
@@ -285,6 +285,9 @@ def admin_force_close_signal(data: ForceCloseSignalRequest):
             "key": key,
             "server_time_utc": utc_now_iso()
         }
+
+    if status == "TP Hit":
+        status = "TP1 Hit"
 
     signal["signal_status"] = status
     signal["updated_at"] = utc_now_iso()
