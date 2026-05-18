@@ -16,6 +16,7 @@ from historical_storage import save_analysis, save_candles_snapshot
 from signal_lifecycle import build_new_signal
 from signal_store import (
     save_active_signal,
+    update_active_signal,
     clear_final_signals,
     _load_all_signals,
     ACTIVE_SIGNALS_FILE,
@@ -25,7 +26,7 @@ from performance_engine import build_performance_summary
 
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="1.8.0"
+    version="1.9.0"
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -33,6 +34,8 @@ CONFIG_FILE = BASE_DIR / "config" / "settings.json"
 USERS_FILE = BASE_DIR / "users" / "users.json"
 LOGS_DIR = BASE_DIR / "logs"
 MARKET_LOG_FILE = LOGS_DIR / "market_logs.jsonl"
+
+FINAL_STATUSES = ["TP Hit", "SL Hit", "Expired"]
 
 
 class Candle(BaseModel):
@@ -67,6 +70,14 @@ class TestSignalRequest(BaseModel):
     tp3: float
     confidence: float = 88
     ttl_minutes: int = 60
+
+
+class ForceCloseSignalRequest(BaseModel):
+    admin_key: str = Field(..., min_length=3)
+    user_key: str = Field(..., min_length=3)
+    symbol: str
+    timeframe: str
+    status: str = "TP Hit"
 
 
 def load_settings():
@@ -120,7 +131,7 @@ def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "1.8.0",
+        "version": "1.9.0",
         "time_utc": utc_now_iso()
     }
 
@@ -130,7 +141,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "1.8.0",
+        "version": "1.9.0",
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -243,6 +254,55 @@ def admin_test_signal(data: TestSignalRequest):
         "status": "ok",
         "message": "Test signal created",
         "signal": lifecycle,
+        "server_time_utc": utc_now_iso()
+    }
+
+
+@app.post("/admin/force-close-signal")
+def admin_force_close_signal(data: ForceCloseSignalRequest):
+    if not check_admin_key(data.admin_key):
+        return admin_error()
+
+    status = data.status.strip()
+
+    if status not in FINAL_STATUSES:
+        return {
+            "status": "error",
+            "code": "INVALID_FINAL_STATUS",
+            "message": "status must be one of: TP Hit, SL Hit, Expired",
+            "server_time_utc": utc_now_iso()
+        }
+
+    signals = _load_all_signals()
+    key = f"{data.user_key}|{data.symbol}|{data.timeframe}"
+    signal = signals.get(key)
+
+    if not signal:
+        return {
+            "status": "error",
+            "code": "SIGNAL_NOT_FOUND",
+            "message": "No active signal found for user_key + symbol + timeframe",
+            "key": key,
+            "server_time_utc": utc_now_iso()
+        }
+
+    signal["signal_status"] = status
+    signal["updated_at"] = utc_now_iso()
+    signal["lifecycle_reason"] = f"Admin force closed signal as {status}"
+
+    update_active_signal(
+        user_key=data.user_key,
+        symbol=data.symbol,
+        timeframe=data.timeframe,
+        signal_data=signal
+    )
+
+    return {
+        "status": "ok",
+        "message": "Signal force closed",
+        "key": key,
+        "signal": signal,
+        "performance": build_performance_summary(),
         "server_time_utc": utc_now_iso()
     }
 
