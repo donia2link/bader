@@ -26,7 +26,7 @@ from performance_engine import build_performance_summary, reset_performance_reco
 
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="2.1.0"
+    version="2.2.0"
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -131,7 +131,7 @@ def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "time_utc": utc_now_iso()
     }
 
@@ -141,7 +141,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -224,6 +224,31 @@ def admin_reset_performance(data: AdminRequest):
     return {
         "status": "ok",
         "result": result,
+        "server_time_utc": utc_now_iso()
+    }
+
+
+@app.post("/admin/reset-test-environment")
+def admin_reset_test_environment(data: AdminRequest):
+    if not check_admin_key(data.admin_key):
+        return admin_error()
+
+    performance_reset = reset_performance_records()
+
+    active_signals_before = 0
+    if ACTIVE_SIGNALS_FILE.exists():
+        current_signals = _load_all_signals()
+        active_signals_before = len(current_signals)
+        ACTIVE_SIGNALS_FILE.unlink()
+
+    performance_after = build_performance_summary()
+
+    return {
+        "status": "ok",
+        "message": "Test environment reset successfully",
+        "performance_reset": performance_reset,
+        "active_signals_cleared": active_signals_before,
+        "performance_after": performance_after,
         "server_time_utc": utc_now_iso()
     }
 
