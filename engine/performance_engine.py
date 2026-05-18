@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -12,6 +13,10 @@ FINAL_STATUSES = ["TP Hit", "TP1 Hit", "TP2 Hit", "TP3 Hit", "SL Hit", "Expired"
 
 def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_stamp():
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def normalize_status(status):
@@ -58,8 +63,9 @@ def record_closed_signal(signal_data):
     Save closed/final signal to performance log.
     Supports TP1 Hit / TP2 Hit / TP3 Hit / SL Hit / Expired.
 
-    v0.3:
+    v0.4:
     - Prevents duplicate records by signal_id.
+    - Adds reset_performance_records().
     """
 
     if not signal_data:
@@ -119,6 +125,36 @@ def record_closed_signal(signal_data):
         "recorded": True,
         "signal_id": payload["signal_id"],
         "status": status
+    }
+
+
+def reset_performance_records():
+    """
+    Backup and clear performance_signals.jsonl.
+    Used before starting a clean demo/live test period.
+    """
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    records_before = load_performance_records()
+    before_count = len(records_before)
+
+    backup_file = ""
+
+    if PERFORMANCE_FILE.exists():
+        backup_path = LOGS_DIR / f"performance_signals_reset_backup_{utc_stamp()}.jsonl"
+        shutil.copy2(PERFORMANCE_FILE, backup_path)
+        backup_file = str(backup_path)
+
+    PERFORMANCE_FILE.write_text("", encoding="utf-8")
+
+    return {
+        "status": "ok",
+        "message": "Performance records reset",
+        "before": before_count,
+        "after": 0,
+        "backup_file": backup_file,
+        "performance_version": "performance_engine_v0.4"
     }
 
 
@@ -204,5 +240,5 @@ def build_performance_summary():
         "avg_confidence": avg_confidence,
         "best_symbol_by_count": best_symbol,
         "best_timeframe_by_count": best_timeframe,
-        "performance_version": "performance_engine_v0.3"
+        "performance_version": "performance_engine_v0.4"
     }

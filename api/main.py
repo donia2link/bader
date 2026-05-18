@@ -21,12 +21,12 @@ from signal_store import (
     _load_all_signals,
     ACTIVE_SIGNALS_FILE,
 )
-from performance_engine import build_performance_summary
+from performance_engine import build_performance_summary, reset_performance_records
 
 
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -131,7 +131,7 @@ def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "time_utc": utc_now_iso()
     }
 
@@ -141,7 +141,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -210,6 +210,20 @@ def admin_performance_summary(data: AdminRequest):
     return {
         "status": "ok",
         "performance": summary,
+        "server_time_utc": utc_now_iso()
+    }
+
+
+@app.post("/admin/reset-performance")
+def admin_reset_performance(data: AdminRequest):
+    if not check_admin_key(data.admin_key):
+        return admin_error()
+
+    result = reset_performance_records()
+
+    return {
+        "status": "ok",
+        "result": result,
         "server_time_utc": utc_now_iso()
     }
 
