@@ -1,0 +1,44 @@
+# Secrets / config
+config/settings.json
+users/users.json
+
+# Runtime logs and signal state
+logs/
+*.jsonl
+active_signals.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+
+# MT5 compiled files
+*.ex5
+
+# Local backups
+*_backup_*.py
+*_backup*.py
+
+
+# Local tools / service files
+.vscode/
+nssm/
+nssm.exe
+nssm-*.zip
+run_api.bat
+
+# Generated docs / local documents
+docs/
+*.docx
