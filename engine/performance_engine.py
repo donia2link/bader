@@ -21,16 +21,60 @@ def normalize_status(status):
     return status
 
 
+def load_performance_records():
+    if not PERFORMANCE_FILE.exists():
+        return []
+
+    records = []
+
+    try:
+        with PERFORMANCE_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                records.append(json.loads(line))
+    except Exception:
+        return []
+
+    return records
+
+
+def signal_already_recorded(signal_id):
+    if not signal_id:
+        return False
+
+    records = load_performance_records()
+
+    for record in records:
+        if record.get("signal_id") == signal_id:
+            return True
+
+    return False
+
+
 def record_closed_signal(signal_data):
     """
     Save closed/final signal to performance log.
     Supports TP1 Hit / TP2 Hit / TP3 Hit / SL Hit / Expired.
+
+    v0.3:
+    - Prevents duplicate records by signal_id.
     """
 
     if not signal_data:
         return {
             "recorded": False,
             "reason": "No signal data"
+        }
+
+    signal_id = signal_data.get("signal_id", "")
+
+    if signal_already_recorded(signal_id):
+        return {
+            "recorded": False,
+            "reason": "Signal already recorded",
+            "signal_id": signal_id
         }
 
     raw_status = signal_data.get("signal_status")
@@ -48,7 +92,7 @@ def record_closed_signal(signal_data):
     payload = {
         "record_type": "CLOSED_SIGNAL",
         "recorded_at": utc_now_iso(),
-        "signal_id": signal_data.get("signal_id", ""),
+        "signal_id": signal_id,
         "user_key": signal_data.get("user_key", ""),
         "symbol": signal_data.get("symbol", ""),
         "timeframe": signal_data.get("timeframe", ""),
@@ -76,25 +120,6 @@ def record_closed_signal(signal_data):
         "signal_id": payload["signal_id"],
         "status": status
     }
-
-
-def load_performance_records():
-    if not PERFORMANCE_FILE.exists():
-        return []
-
-    records = []
-
-    try:
-        with PERFORMANCE_FILE.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                records.append(json.loads(line))
-    except Exception:
-        return []
-
-    return records
 
 
 def build_performance_summary():
@@ -141,9 +166,21 @@ def build_performance_summary():
     best_symbol = max(symbols, key=symbols.get) if symbols else "none"
     best_timeframe = max(timeframes, key=timeframes.get) if timeframes else "none"
 
+    unique_signal_ids = set()
+    duplicate_count = 0
+
+    for r in records:
+        signal_id = r.get("signal_id", "")
+        if signal_id in unique_signal_ids:
+            duplicate_count += 1
+        elif signal_id:
+            unique_signal_ids.add(signal_id)
+
     return {
         "status": "ok",
         "total_closed_signals": total,
+        "unique_closed_signals": len(unique_signal_ids),
+        "duplicate_records_detected": duplicate_count,
 
         "tp_hits_total": tp_hits_total,
         "tp1_hits": tp1_hits,
@@ -167,5 +204,5 @@ def build_performance_summary():
         "avg_confidence": avg_confidence,
         "best_symbol_by_count": best_symbol,
         "best_timeframe_by_count": best_timeframe,
-        "performance_version": "performance_engine_v0.2"
+        "performance_version": "performance_engine_v0.3"
     }
