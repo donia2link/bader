@@ -26,7 +26,7 @@ from performance_engine import build_performance_summary, reset_performance_reco
 
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="2.2.0"
+    version="2.3.0"
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -126,12 +126,35 @@ def write_market_log(payload: dict):
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def read_last_market_log():
+    if not MARKET_LOG_FILE.exists():
+        return None
+
+    try:
+        with MARKET_LOG_FILE.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        if not lines:
+            return None
+
+        last_line = lines[-1].strip()
+
+        if not last_line:
+            return None
+
+        return json.loads(last_line)
+    except Exception as e:
+        return {
+            "error": str(e)
+        }
+
+
 @app.get("/")
 def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "time_utc": utc_now_iso()
     }
 
@@ -141,7 +164,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -155,6 +178,40 @@ def old_signal():
         "status": "ok",
         "message": "Use POST /analyze for real market reader",
         "endpoint": "/analyze"
+    }
+
+
+@app.post("/admin/system-status")
+def admin_system_status(data: AdminRequest):
+    if not check_admin_key(data.admin_key):
+        return admin_error()
+
+    active_signals = _load_all_signals()
+    performance = build_performance_summary()
+    users = load_users()
+    last_market_log = read_last_market_log()
+
+    return {
+        "status": "ok",
+        "api_version": "2.3.0",
+        "server_time_utc": utc_now_iso(),
+        "files": {
+            "settings_file_exists": CONFIG_FILE.exists(),
+            "users_file_exists": USERS_FILE.exists(),
+            "logs_dir_exists": LOGS_DIR.exists(),
+            "active_signals_file_exists": ACTIVE_SIGNALS_FILE.exists(),
+            "market_log_file_exists": MARKET_LOG_FILE.exists()
+        },
+        "users": {
+            "users_count": len(users),
+            "active_users_count": sum(1 for user in users.values() if user.get("active", False))
+        },
+        "active_signals": {
+            "count": len(active_signals),
+            "signals": active_signals
+        },
+        "performance": performance,
+        "last_market_log": last_market_log
     }
 
 
