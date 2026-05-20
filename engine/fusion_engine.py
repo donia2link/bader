@@ -83,11 +83,6 @@ def _quality_score(pass_count, fusion_score, danger_score, risk_penalty):
 
 
 def _detect_trade_mode(final_confidence, danger_score, session_score, volatility_score, risk_penalty):
-    """
-    Basic trade mode classification.
-    Later this can become user configurable.
-    """
-
     if danger_score >= 60 or risk_penalty <= -35:
         return "blocked"
 
@@ -103,20 +98,107 @@ def _detect_trade_mode(final_confidence, danger_score, session_score, volatility
     return "no_trade"
 
 
-def _grade_signal(direction, quality_score, pass_count, final_confidence, danger_score, risk_penalty):
+def _has_hard_block(direction, blocks):
+    """
+    Hard blocks prevent bad weak signals.
+
+    BUY hard blocks:
+    - liquidity against buy
+    - near resistance
+    - dead market
+    - low activity session
+    - high danger
+
+    SELL hard blocks:
+    - liquidity against sell
+    - near support
+    - dead market
+    - low activity session
+    - high danger
+    """
+
+    if direction == "BUY":
+        hard_block_names = [
+            "liquidity_ok_for_buy",
+            "not_near_resistance_zone",
+            "not_near_resistance",
+            "not_dead_market",
+            "session_ok",
+            "danger_ok"
+        ]
+    else:
+        hard_block_names = [
+            "liquidity_ok_for_sell",
+            "not_near_support_zone",
+            "not_near_support",
+            "not_dead_market",
+            "session_ok",
+            "danger_ok"
+        ]
+
+    failed = [name for name in hard_block_names if not blocks.get(name, False)]
+
+    return {
+        "has_hard_block": len(failed) > 0,
+        "hard_failed_blocks": failed
+    }
+
+
+def _grade_signal(direction, quality_score, pass_count, final_confidence, danger_score, risk_penalty, blocks):
     if danger_score >= 60 or risk_penalty <= -40:
         return "WAIT"
 
+    hard = _has_hard_block(direction, blocks)
+
+    if hard["has_hard_block"]:
+        return "WAIT"
+
     if direction == "BUY":
-        if quality_score >= 82 and pass_count >= 9 and final_confidence >= 75:
+        trend_ok = blocks.get("trend_bullish", False)
+        momentum_ok = blocks.get("momentum_up", False)
+        structure_ok = blocks.get("structure_bullish", False)
+
+        if (
+            quality_score >= 86
+            and pass_count >= 9
+            and final_confidence >= 75
+            and trend_ok
+            and momentum_ok
+            and structure_ok
+        ):
             return "Strong BUY"
-        if quality_score >= 62 and pass_count >= 7 and final_confidence >= 55:
+
+        if (
+            quality_score >= 72
+            and pass_count >= 8
+            and final_confidence >= 60
+            and trend_ok
+            and momentum_ok
+        ):
             return "Weak BUY"
 
     if direction == "SELL":
-        if quality_score >= 82 and pass_count >= 9 and final_confidence >= 75:
+        trend_ok = blocks.get("trend_bearish", False)
+        momentum_ok = blocks.get("momentum_down", False)
+        structure_ok = blocks.get("structure_bearish", False)
+
+        if (
+            quality_score >= 86
+            and pass_count >= 9
+            and final_confidence >= 75
+            and trend_ok
+            and momentum_ok
+            and structure_ok
+        ):
             return "Strong SELL"
-        if quality_score >= 62 and pass_count >= 7 and final_confidence >= 55:
+
+        if (
+            quality_score >= 72
+            and pass_count >= 8
+            and final_confidence >= 60
+            and trend_ok
+            and momentum_ok
+        ):
             return "Weak SELL"
 
     return "WAIT"
@@ -136,20 +218,14 @@ def fuse_decision(
     decision_blocks
 ):
     """
-    QuantBado Decision Fusion Engine v0.2
+    QuantBado Decision Fusion Engine v0.3
 
-    Combines all engine scores and decision blocks into a final market decision.
-
-    v0.2 adds:
-    - signal_grade
-    - trade_mode
-    - buy_quality_score
-    - sell_quality_score
-    - direction_bias
-    - blocked_reasons
-
-    Compatibility:
-    - final_signal still returns BUY / SELL / WAIT for market_reader.py
+    v0.3 changes:
+    - Blocks BUY if liquidity is against buy.
+    - Blocks SELL if liquidity is against sell.
+    - Blocks weak signals near opposite SR zone.
+    - Strong signals now require trend + momentum + structure alignment.
+    - Weak signals require trend + momentum alignment.
     """
 
     danger_penalty = -abs(danger_score)
@@ -189,7 +265,15 @@ def fuse_decision(
         risk_penalty=risk_penalty
     )
 
+    buy_hard = _has_hard_block("BUY", buy_blocks)
+    sell_hard = _has_hard_block("SELL", sell_blocks)
+
     blocked_reasons = []
+
+    if buy_hard["has_hard_block"] and sell_hard["has_hard_block"]:
+        blocked_reasons.append(
+            "Both directions have hard blocks"
+        )
 
     if not buy_blocks.get("danger_ok", True) or not sell_blocks.get("danger_ok", True):
         blocked_reasons.append("High market danger")
@@ -210,17 +294,14 @@ def fuse_decision(
     else:
         direction_bias = "neutral"
 
-    final_signal = "WAIT"
-    final_risk = "high"
-    reason_parts = []
-
     buy_grade = _grade_signal(
         direction="BUY",
         quality_score=buy_quality_score,
         pass_count=buy_pass_count,
         final_confidence=final_confidence,
         danger_score=danger_score,
-        risk_penalty=risk_penalty
+        risk_penalty=risk_penalty,
+        blocks=buy_blocks
     )
 
     sell_grade = _grade_signal(
@@ -229,35 +310,41 @@ def fuse_decision(
         pass_count=sell_pass_count,
         final_confidence=final_confidence,
         danger_score=danger_score,
-        risk_penalty=risk_penalty
+        risk_penalty=risk_penalty,
+        blocks=sell_blocks
     )
 
+    final_signal = "WAIT"
     signal_grade = "WAIT"
+    final_risk = "high"
+    reason_parts = []
 
-    if blocked_reasons:
-        final_signal = "WAIT"
-        signal_grade = "WAIT"
-        final_risk = "high"
-        reason_parts.append("Trade blocked: " + ", ".join(blocked_reasons))
-
-    elif buy_grade in ["Strong BUY", "Weak BUY"] and buy_quality_score >= sell_quality_score:
-        signal_grade = buy_grade
+    if buy_grade in ["Strong BUY", "Weak BUY"] and buy_quality_score >= sell_quality_score:
         final_signal = "BUY"
-        reason_parts.append(
-            f"{signal_grade} confirmed by fusion quality score"
-        )
+        signal_grade = buy_grade
+        reason_parts.append(f"{signal_grade} confirmed by strict fusion v0.3")
 
     elif sell_grade in ["Strong SELL", "Weak SELL"] and sell_quality_score > buy_quality_score:
-        signal_grade = sell_grade
         final_signal = "SELL"
-        reason_parts.append(
-            f"{signal_grade} confirmed by fusion quality score"
-        )
+        signal_grade = sell_grade
+        reason_parts.append(f"{signal_grade} confirmed by strict fusion v0.3")
 
     else:
         final_signal = "WAIT"
         signal_grade = "WAIT"
-        reason_parts.append("Fusion engine did not confirm enough aligned conditions")
+
+        wait_reasons = []
+
+        if buy_hard["has_hard_block"]:
+            wait_reasons.append("BUY blocked: " + ", ".join(buy_hard["hard_failed_blocks"]))
+
+        if sell_hard["has_hard_block"]:
+            wait_reasons.append("SELL blocked: " + ", ".join(sell_hard["hard_failed_blocks"]))
+
+        if not wait_reasons:
+            wait_reasons.append("Not enough aligned strict conditions")
+
+        reason_parts.append(" | ".join(wait_reasons))
 
     trade_mode = _detect_trade_mode(
         final_confidence=final_confidence,
@@ -296,5 +383,7 @@ def fuse_decision(
         "blocked_reasons": blocked_reasons,
         "buy_failed_blocks": buy_failed_blocks,
         "sell_failed_blocks": sell_failed_blocks,
-        "fusion_version": "fusion_engine_v0.2"
+        "buy_hard_failed_blocks": buy_hard["hard_failed_blocks"],
+        "sell_hard_failed_blocks": sell_hard["hard_failed_blocks"],
+        "fusion_version": "fusion_engine_v0.3"
     }
