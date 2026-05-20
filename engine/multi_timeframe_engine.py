@@ -3,7 +3,7 @@ from signal_lifecycle import build_new_signal, update_signal_status
 from signal_store import get_active_signal, save_active_signal, update_active_signal
 
 
-DEFAULT_TIMEFRAMES = ["M1", "M5", "M15", "H1"]
+DEFAULT_TIMEFRAMES = ["M1", "M5", "M15", "H1", "H4"]
 MTF_TIMEFRAME_KEY = "MTF"
 
 
@@ -19,18 +19,12 @@ def _get_result(results, timeframe):
 
 
 def _score_direction(results):
-    """
-    Gives weighted direction score from multiple timeframes.
-
-    H1/M15 decide bias.
-    M5/M1 help entry timing.
-    """
-
     weights = {
         "M1": 1,
         "M5": 2,
         "M15": 3,
-        "H1": 4
+        "H1": 4,
+        "H4": 5
     }
 
     buy_score = 0
@@ -51,8 +45,7 @@ def _score_direction(results):
 
         if signal == "BUY":
             local_buy += 3
-
-        if signal == "SELL":
+        elif signal == "SELL":
             local_sell += 3
 
         if trend == "bullish":
@@ -102,11 +95,6 @@ def _score_direction(results):
 
 
 def _select_entry_timeframe(results, direction):
-    """
-    Prefer M1 entry if aligned.
-    Otherwise fallback to M5.
-    """
-
     for tf in ["M1", "M5"]:
         result = _get_result(results, tf)
 
@@ -132,10 +120,6 @@ def _select_entry_timeframe(results, direction):
 
 
 def _build_mtf_levels(results, direction, entry_tf):
-    """
-    Uses lower timeframe entry but validates SL/TP using ATR.
-    """
-
     entry_result = _get_result(results, entry_tf)
 
     entry = _safe_float(entry_result.get("entry", 0))
@@ -206,7 +190,7 @@ def _last_price_from_results(results, entry_tf):
     if entry > 0:
         return entry
 
-    for tf in ["M1", "M5", "M15", "H1"]:
+    for tf in ["M1", "M5", "M15", "H1", "H4"]:
         r = _get_result(results, tf)
         value = _safe_float(r.get("entry", 0))
         if value > 0:
@@ -215,7 +199,101 @@ def _last_price_from_results(results, entry_tf):
     return 0
 
 
-def _build_wait_response(symbol, results, direction_score, reason):
+def _quality_from_result(result):
+    signal = result.get("signal", "WAIT")
+    confidence = _safe_float(result.get("confidence", 0))
+    grade = result.get("signal_grade", "WAIT")
+
+    if signal not in ["BUY", "SELL"]:
+        return "No Trade"
+
+    if "Strong" in grade or confidence >= 85:
+        return f"{signal} Strong"
+
+    if confidence >= 65:
+        return f"{signal} Medium"
+
+    return f"{signal} Weak"
+
+
+def _preferred_target(result):
+    """
+    For compact panel display.
+    Shows a practical target based on available levels.
+    """
+    signal = result.get("signal", "WAIT")
+
+    tp1 = _safe_float(result.get("tp1", 0))
+    tp2 = _safe_float(result.get("tp2", 0))
+    tp3 = _safe_float(result.get("tp3", 0))
+
+    if signal not in ["BUY", "SELL"]:
+        return 0
+
+    if tp2 > 0:
+        return tp2
+
+    if tp1 > 0:
+        return tp1
+
+    return tp3
+
+
+def _build_individual_signals(results):
+    output = {}
+
+    for tf in DEFAULT_TIMEFRAMES:
+        r = results.get(tf)
+
+        if not r:
+            output[tf] = {
+                "timeframe": tf,
+                "signal": "WAIT",
+                "trend": "unknown",
+                "trend_direction": "FLAT",
+                "quality": "No Data",
+                "confidence": 0,
+                "entry": 0,
+                "sl": 0,
+                "tp1": 0,
+                "tp2": 0,
+                "tp3": 0,
+                "target": 0,
+                "signal_grade": "WAIT",
+                "reason": "No candles"
+            }
+            continue
+
+        trend = r.get("trend", "range")
+        momentum_direction = r.get("momentum_direction", "flat")
+
+        trend_direction = "FLAT"
+        if trend == "bullish" or momentum_direction == "up":
+            trend_direction = "UP"
+        elif trend == "bearish" or momentum_direction == "down":
+            trend_direction = "DOWN"
+
+        output[tf] = {
+            "timeframe": tf,
+            "signal": r.get("signal", "WAIT"),
+            "trend": trend,
+            "trend_direction": trend_direction,
+            "quality": _quality_from_result(r),
+            "confidence": r.get("confidence", 0),
+            "entry": r.get("entry", 0),
+            "sl": r.get("sl", 0),
+            "tp1": r.get("tp1", 0),
+            "tp2": r.get("tp2", 0),
+            "tp3": r.get("tp3", 0),
+            "target": _preferred_target(r),
+            "signal_grade": r.get("signal_grade", "WAIT"),
+            "reason": r.get("reason", "")
+        }
+
+    return output
+
+
+def _build_wait_response(symbol, results, direction_score, individual_signals, reason):
     return {
         "status": "ok",
         "symbol": symbol,
@@ -225,6 +303,7 @@ def _build_wait_response(symbol, results, direction_score, reason):
         "reason": reason,
         "buy_score": direction_score["buy_score"],
         "sell_score": direction_score["sell_score"],
+        "individual_signals": individual_signals,
         "timeframe_results": results,
         "direction_details": direction_score["details"],
         "signal_lifecycle": {
@@ -233,19 +312,17 @@ def _build_wait_response(symbol, results, direction_score, reason):
             "signal_id": "",
             "lifecycle_reason": reason
         },
-        "mtf_version": "multi_timeframe_engine_v0.2"
+        "mtf_version": "multi_timeframe_engine_v0.4"
     }
 
 
 def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
     """
-    QuantBado Multi-Timeframe Engine v0.2
+    QuantBado Multi-Timeframe Engine v0.4
 
-    v0.2:
-    - Combines M1/M5/M15/H1 into one decision.
-    - Saves MTF active signal using timeframe key: MTF.
-    - Tracks TP1/TP2 as partial.
-    - Records TP3/SL/Expired through signal_store/performance.
+    - Analyzes M1/M5/M15/H1/H4.
+    - Returns individual_signals for each timeframe.
+    - Keeps combined MTF signal lifecycle using timeframe key: MTF.
     """
 
     results = {}
@@ -267,10 +344,11 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
         return {
             "status": "error",
             "message": "No timeframe candle data provided",
-            "mtf_version": "multi_timeframe_engine_v0.2"
+            "mtf_version": "multi_timeframe_engine_v0.4"
         }
 
     direction_score = _score_direction(results)
+    individual_signals = _build_individual_signals(results)
 
     buy_score = direction_score["buy_score"]
     sell_score = direction_score["sell_score"]
@@ -325,10 +403,11 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
             "buy_score": buy_score,
             "sell_score": sell_score,
             "reason": "Existing MTF active signal is being tracked",
+            "individual_signals": individual_signals,
             "signal_lifecycle": lifecycle,
             "timeframe_results": results,
             "direction_details": direction_score["details"],
-            "mtf_version": "multi_timeframe_engine_v0.2"
+            "mtf_version": "multi_timeframe_engine_v0.4"
         }
 
     if final_signal == "WAIT":
@@ -336,6 +415,7 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
             symbol=symbol,
             results=results,
             direction_score=direction_score,
+            individual_signals=individual_signals,
             reason="Multi-timeframe scores are not aligned enough"
         )
 
@@ -347,6 +427,7 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
             symbol=symbol,
             results=results,
             direction_score=direction_score,
+            individual_signals=individual_signals,
             reason="MTF levels invalid, no trade"
         )
 
@@ -400,8 +481,9 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
         "buy_score": buy_score,
         "sell_score": sell_score,
         "reason": f"Multi-timeframe {final_signal} selected from {entry_tf}",
+        "individual_signals": individual_signals,
         "signal_lifecycle": lifecycle,
         "timeframe_results": results,
         "direction_details": direction_score["details"],
-        "mtf_version": "multi_timeframe_engine_v0.2"
+        "mtf_version": "multi_timeframe_engine_v0.4"
     }

@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //| QuantBado Market Reader MTF                                      |
-//| Multi-Timeframe EA: M1 + M5 + M15 + H1                           |
+//| M1 + M5 + M15 + H1 + H4                                          |
 //| Sends candles to FastAPI /analyze-mtf                            |
 //| Reader only - no trading orders                                  |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "2.7"
-#property description "QuantBado MTF Reader - strategy quality panel + short entry/exit levels - reader only"
+#property version   "2.8"
+#property description "QuantBado MTF Reader - individual timeframe strategy panel - reader only"
 
 input string InpServerUrl = "http://quantbado.online/analyze-mtf";
 input string InpUserKey   = "test123";
@@ -16,9 +16,11 @@ input int    InpTimerSec  = 20;
 input bool   InpShowPanel = true;
 input bool   InpDrawLines = true;
 
-input int    InpPanelX    = 230;
+input int    InpPanelX    = 10;
 input int    InpPanelY    = 28;
 input int    InpLineBars  = 8;
+
+input string InpLineFrame = "BEST"; // BEST, M1, M5, M15, H1, H4, MTF
 
 string g_lastResponse = "";
 datetime g_lastRequestTime = 0;
@@ -30,7 +32,7 @@ int OnInit()
 {
    EventSetTimer(InpTimerSec);
 
-   Print("QuantBado MTF EA v2.7 started.");
+   Print("QuantBado MTF EA v2.8 started.");
    Print("Server URL: ", InpServerUrl);
    Print("Symbol: ", _Symbol);
    Print("Reader only. No trading functions.");
@@ -93,6 +95,7 @@ string TFToString(ENUM_TIMEFRAMES tf)
    if(tf == PERIOD_M5)  return "M5";
    if(tf == PERIOD_M15) return "M15";
    if(tf == PERIOD_H1)  return "H1";
+   if(tf == PERIOD_H4)  return "H4";
    return "UNKNOWN";
 }
 
@@ -135,14 +138,15 @@ bool BuildCandlesJson(ENUM_TIMEFRAMES tf, string &jsonOut)
 //+------------------------------------------------------------------+
 bool BuildRequestBody(string &body)
 {
-   string m1, m5, m15, h1;
+   string m1, m5, m15, h1, h4;
 
    bool okM1  = BuildCandlesJson(PERIOD_M1, m1);
    bool okM5  = BuildCandlesJson(PERIOD_M5, m5);
    bool okM15 = BuildCandlesJson(PERIOD_M15, m15);
    bool okH1  = BuildCandlesJson(PERIOD_H1, h1);
+   bool okH4  = BuildCandlesJson(PERIOD_H4, h4);
 
-   if(!okM1 || !okM5 || !okM15 || !okH1)
+   if(!okM1 || !okM5 || !okM15 || !okH1 || !okH4)
    {
       Print("MTF request skipped. Missing candle data.");
       return false;
@@ -155,7 +159,8 @@ bool BuildRequestBody(string &body)
    body += "\"M1\":"  + m1  + ",";
    body += "\"M5\":"  + m5  + ",";
    body += "\"M15\":" + m15 + ",";
-   body += "\"H1\":"  + h1;
+   body += "\"H1\":"  + h1  + ",";
+   body += "\"H4\":"  + h4;
    body += "}";
    body += "}";
 
@@ -214,7 +219,7 @@ void SendMTFRequest()
 }
 
 //+------------------------------------------------------------------+
-//| JSON helpers                                                     |
+//| JSON simple extraction                                           |
 //+------------------------------------------------------------------+
 string ExtractJsonString(string json, string key)
 {
@@ -264,67 +269,50 @@ double ExtractJsonDouble(string json, string key)
    return StringToDouble(v);
 }
 
-//+------------------------------------------------------------------+
-//| Strategy quality helpers                                         |
-//+------------------------------------------------------------------+
-string QualityLabel(double confidence, string signal)
+string ExtractObject(string json, string key)
 {
-   if(signal == "WAIT")
-      return "NO TRADE";
+   string pattern = "\"" + key + "\":{";
+   int pos = StringFind(json, pattern);
 
-   if(confidence >= 85)
-      return "A+ HIGH";
+   if(pos < 0)
+      return "";
 
-   if(confidence >= 70)
-      return "B GOOD";
+   pos += StringLen(pattern) - 1;
 
-   if(confidence >= 55)
-      return "C WEAK";
+   int depth = 0;
+   int start = pos;
 
-   return "LOW";
-}
-
-color QualityColor(double confidence, string signal)
-{
-   if(signal == "WAIT")
-      return C'245,158,11';
-
-   if(confidence >= 85)
-      return C'0,200,83';
-
-   if(confidence >= 70)
-      return C'37,99,235';
-
-   if(confidence >= 55)
-      return C'245,158,11';
-
-   return C'230,57,70';
-}
-
-string LevelStatusText(string signal, double entry, double sl, double tp1, double tp2, double tp3)
-{
-   if(signal == "WAIT" || entry <= 0)
-      return "Waiting for aligned MTF setup";
-
-   if(signal == "BUY")
+   for(int i = pos; i < StringLen(json); i++)
    {
-      if(!(sl < entry && entry < tp1 && tp1 < tp2 && tp2 < tp3))
-         return "Invalid BUY levels";
-      return "BUY levels OK";
+      ushort ch = StringGetCharacter(json, i);
+
+      if(ch == '{')
+         depth++;
+
+      if(ch == '}')
+      {
+         depth--;
+
+         if(depth == 0)
+            return StringSubstr(json, start, i - start + 1);
+      }
    }
 
-   if(signal == "SELL")
-   {
-      if(!(tp3 < tp2 && tp2 < tp1 && tp1 < entry && entry < sl))
-         return "Invalid SELL levels";
-      return "SELL levels OK";
-   }
+   return "";
+}
 
-   return "No valid signal";
+string ExtractIndividualTF(string tf)
+{
+   string individual = ExtractObject(g_lastResponse, "individual_signals");
+
+   if(individual == "")
+      return "";
+
+   return ExtractObject(individual, tf);
 }
 
 //+------------------------------------------------------------------+
-//| Theme helpers                                                    |
+//| Theme                                                            |
 //+------------------------------------------------------------------+
 bool IsDarkChart()
 {
@@ -342,9 +330,9 @@ bool IsDarkChart()
 color PanelBgColor()
 {
    if(IsDarkChart())
-      return C'18,22,28';
+      return C'5,12,18';
 
-   return C'250,250,250';
+   return C'248,250,252';
 }
 
 color PanelTextColor()
@@ -358,28 +346,45 @@ color PanelTextColor()
 color MutedTextColor()
 {
    if(IsDarkChart())
-      return C'170,178,190';
+      return C'160,170,180';
 
    return C'75,85,99';
 }
 
 color BorderColor()
 {
-   if(IsDarkChart())
-      return C'30,144,255';
-
    return C'37,99,235';
+}
+
+color HeaderColor()
+{
+   return C'0,80,150';
+}
+
+color BuyColor()
+{
+   return C'0,210,100';
+}
+
+color SellColor()
+{
+   return C'230,57,70';
+}
+
+color WaitColor()
+{
+   return C'245,158,11';
 }
 
 color SignalColor(string signal)
 {
    if(signal == "BUY")
-      return C'0,190,90';
+      return BuyColor();
 
    if(signal == "SELL")
-      return C'225,55,70';
+      return SellColor();
 
-   return C'245,158,11';
+   return WaitColor();
 }
 
 color EntryColor()
@@ -389,16 +394,16 @@ color EntryColor()
 
 color SLColor()
 {
-   return C'225,55,70';
+   return C'230,57,70';
 }
 
 color TPColor()
 {
-   return C'0,165,85';
+   return C'0,170,85';
 }
 
 //+------------------------------------------------------------------+
-//| Object helpers                                                   |
+//| Objects                                                          |
 //+------------------------------------------------------------------+
 void CreateRect(string name, int x, int y, int w, int h, color bg, color border)
 {
@@ -439,27 +444,81 @@ void CreateLabel(string name, string text, int x, int y, color clr, int size = 9
 }
 
 //+------------------------------------------------------------------+
-//| Draw panel                                                       |
+//| Panel rows                                                       |
+//+------------------------------------------------------------------+
+string CleanSignal(string signal)
+{
+   if(signal == "")
+      return "WAIT";
+
+   return signal;
+}
+
+string CleanTrend(string trendDir)
+{
+   if(trendDir == "")
+      return "FLAT";
+
+   return trendDir;
+}
+
+string ShortQuality(string q)
+{
+   if(q == "")
+      return "No Trade";
+
+   return q;
+}
+
+void DrawFrameBox(string tf, int x, int y)
+{
+   string obj = ExtractIndividualTF(tf);
+
+   string signal = CleanSignal(ExtractJsonString(obj, "signal"));
+   string trendDir = CleanTrend(ExtractJsonString(obj, "trend_direction"));
+   string quality = ShortQuality(ExtractJsonString(obj, "quality"));
+
+   double entry = ExtractJsonDouble(obj, "entry");
+   double sl = ExtractJsonDouble(obj, "sl");
+   double target = ExtractJsonDouble(obj, "target");
+
+   color bg = PanelBgColor();
+   color border = SignalColor(signal);
+   color txt = PanelTextColor();
+   color muted = MutedTextColor();
+   color sigClr = SignalColor(signal);
+
+   CreateRect("BOX_" + tf, x, y, 255, 72, bg, border);
+
+   CreateLabel("TF_" + tf, tf + " Trend: " + trendDir, x + 8, y + 6, sigClr, 10, true);
+   CreateLabel("Q_" + tf, "Quality: " + quality, x + 8, y + 24, SignalColor(signal), 9, false);
+
+   if(signal == "WAIT" || entry <= 0)
+   {
+      CreateLabel("E_" + tf, "Entry: Waiting setup", x + 8, y + 43, muted, 8, false);
+      CreateLabel("T_" + tf, "TP / SL: --", x + 8, y + 58, muted, 8, false);
+      return;
+   }
+
+   CreateLabel("E_" + tf, "Entry: " + signal + " " + DoubleToString(entry, _Digits), x + 8, y + 43, txt, 8, false);
+   CreateLabel("T_" + tf, "TP: " + DoubleToString(target, _Digits) + " / SL: " + DoubleToString(sl, _Digits), x + 8, y + 58, txt, 8, false);
+}
+
 //+------------------------------------------------------------------+
 void DrawPanel()
 {
-   string signal     = ExtractJsonString(g_lastResponse, "signal");
+   int x = InpPanelX;
+   int y = InpPanelY;
+   int w = 270;
+   int h = 430;
+
+   string mtfSignal = ExtractJsonString(g_lastResponse, "signal");
    string confidence = ExtractJsonString(g_lastResponse, "confidence");
-   string bias       = ExtractJsonString(g_lastResponse, "bias");
-   string entryTf    = ExtractJsonString(g_lastResponse, "entry_timeframe");
-   string entry      = ExtractJsonString(g_lastResponse, "entry");
-   string sl         = ExtractJsonString(g_lastResponse, "sl");
-   string tp1        = ExtractJsonString(g_lastResponse, "tp1");
-   string tp2        = ExtractJsonString(g_lastResponse, "tp2");
-   string tp3        = ExtractJsonString(g_lastResponse, "tp3");
-   string maxTp      = ExtractJsonString(g_lastResponse, "max_tp_hit");
-   string reason     = ExtractJsonString(g_lastResponse, "reason");
-   string mtfVersion = ExtractJsonString(g_lastResponse, "mtf_version");
+   string bias = ExtractJsonString(g_lastResponse, "bias");
+   string version = ExtractJsonString(g_lastResponse, "mtf_version");
 
-   if(signal == "")
-      signal = "WAIT";
-
-   double conf = StringToDouble(confidence);
+   if(mtfSignal == "")
+      mtfSignal = "WAIT";
 
    if(confidence == "")
       confidence = "0";
@@ -467,73 +526,38 @@ void DrawPanel()
    if(bias == "")
       bias = "-";
 
-   if(entryTf == "")
-      entryTf = "-";
+   if(version == "")
+      version = "mtf";
 
-   if(maxTp == "")
-      maxTp = "none";
+   CreateRect("MAIN_BG", x, y, w, h, PanelBgColor(), BorderColor());
+   CreateRect("HEADER", x, y, w, 48, HeaderColor(), HeaderColor());
 
-   if(mtfVersion == "")
-      mtfVersion = "mtf";
+   CreateLabel("TITLE", _Symbol + " MTF", x + 12, y + 6, clrWhite, 12, true);
+   CreateLabel("TIME", TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), x + 12, y + 25, clrWhite, 8, false);
 
-   if(reason == "")
-      reason = "Waiting for MTF response";
+   CreateLabel("MTF_SIGNAL", "BIAS: " + mtfSignal + "  " + confidence + "%  " + bias, x + 150, y + 12, SignalColor(mtfSignal), 9, true);
 
-   if(StringLen(reason) > 42)
-      reason = StringSubstr(reason, 0, 42) + "...";
+   int rowY = y + 58;
 
-   double dEntry = StringToDouble(entry);
-   double dSL = StringToDouble(sl);
-   double dTP1 = StringToDouble(tp1);
-   double dTP2 = StringToDouble(tp2);
-   double dTP3 = StringToDouble(tp3);
+   DrawFrameBox("H4", x + 8, rowY);
+   rowY += 76;
 
-   string quality = QualityLabel(conf, signal);
-   string levelStatus = LevelStatusText(signal, dEntry, dSL, dTP1, dTP2, dTP3);
+   DrawFrameBox("H1", x + 8, rowY);
+   rowY += 76;
 
-   int x = InpPanelX;
-   int y = InpPanelY;
-   int w = 320;
-   int h = 245;
+   DrawFrameBox("M15", x + 8, rowY);
+   rowY += 76;
 
-   color bg = PanelBgColor();
-   color txt = PanelTextColor();
-   color muted = MutedTextColor();
-   color border = BorderColor();
-   color sigClr = SignalColor(signal);
-   color qClr = QualityColor(conf, signal);
+   DrawFrameBox("M5", x + 8, rowY);
+   rowY += 76;
 
-   CreateRect("PANEL_BG", x, y, w, h, bg, border);
-   CreateRect("HEADER_BG", x, y, w, 40, border, border);
+   DrawFrameBox("M1", x + 8, rowY);
 
-   CreateLabel("TITLE", "QuantBado MTF Strategy", x + 12, y + 9, clrWhite, 10, true);
-   CreateLabel("SUB", _Symbol + " | M1 M5 M15 H1", x + 172, y + 11, clrWhite, 8, false);
-
-   CreateLabel("SIG_L", "SIGNAL", x + 12, y + 55, muted, 8, false);
-   CreateLabel("SIG_V", signal, x + 78, y + 48, sigClr, 18, true);
-
-   CreateLabel("Q_L", "QUALITY", x + 178, y + 55, muted, 8, false);
-   CreateLabel("Q_V", quality, x + 240, y + 52, qClr, 10, true);
-
-   CreateLabel("CONF", "Conf: " + confidence + "   Bias: " + bias + "   Entry TF: " + entryTf, x + 12, y + 82, txt, 9, false);
-   CreateLabel("MAXTP", "Max TP: " + maxTp + "   Status: " + levelStatus, x + 12, y + 103, muted, 8, false);
-
-   CreateLabel("ENTRY", "ENTRY   " + entry, x + 12, y + 130, EntryColor(), 9, true);
-   CreateLabel("SL",    "SL      " + sl,    x + 12, y + 151, SLColor(), 9, true);
-
-   CreateLabel("TP1",   "TP1     " + tp1,   x + 168, y + 130, TPColor(), 9, true);
-   CreateLabel("TP2",   "TP2     " + tp2,   x + 168, y + 151, TPColor(), 9, true);
-   CreateLabel("TP3",   "TP3     " + tp3,   x + 168, y + 172, TPColor(), 9, true);
-
-   CreateLabel("REASON_L", "Reason", x + 12, y + 202, muted, 8, false);
-   CreateLabel("REASON", reason, x + 62, y + 202, txt, 8, false);
-
-   CreateLabel("VERSION", mtfVersion, x + 12, y + 224, muted, 8, false);
-   CreateLabel("TIME", "Last: " + TimeToString(g_lastRequestTime, TIME_SECONDS), x + 210, y + 224, muted, 8, false);
+   CreateLabel("FOOT", version + " | Reader only", x + 12, y + h - 18, MutedTextColor(), 8, false);
 }
 
 //+------------------------------------------------------------------+
-//| Trade line helpers                                               |
+//| Lines                                                            |
 //+------------------------------------------------------------------+
 void DeleteTradeLines()
 {
@@ -544,6 +568,38 @@ void DeleteTradeLines()
       ObjectDelete(0, PREFIX + "LINE_" + tags[i]);
       ObjectDelete(0, PREFIX + "TEXT_" + tags[i]);
    }
+}
+
+string PickLineObject()
+{
+   string wanted = InpLineFrame;
+
+   if(wanted == "MTF")
+      return g_lastResponse;
+
+   if(wanted == "BEST")
+   {
+      string frames[] = {"M1", "M5", "M15", "H1", "H4"};
+
+      for(int i = 0; i < ArraySize(frames); i++)
+      {
+         string obj = ExtractIndividualTF(frames[i]);
+         string sig = ExtractJsonString(obj, "signal");
+         double entry = ExtractJsonDouble(obj, "entry");
+
+         if((sig == "BUY" || sig == "SELL") && entry > 0)
+            return obj;
+      }
+
+      return g_lastResponse;
+   }
+
+   string tfObj = ExtractIndividualTF(wanted);
+
+   if(tfObj != "")
+      return tfObj;
+
+   return g_lastResponse;
 }
 
 void DrawShortLevel(string tag, double price, color clr, string label)
@@ -593,13 +649,15 @@ void DrawShortLevel(string tag, double price, color clr, string label)
 //+------------------------------------------------------------------+
 void DrawTradeLines()
 {
-   string signal = ExtractJsonString(g_lastResponse, "signal");
+   string obj = PickLineObject();
 
-   double entry = ExtractJsonDouble(g_lastResponse, "entry");
-   double sl    = ExtractJsonDouble(g_lastResponse, "sl");
-   double tp1   = ExtractJsonDouble(g_lastResponse, "tp1");
-   double tp2   = ExtractJsonDouble(g_lastResponse, "tp2");
-   double tp3   = ExtractJsonDouble(g_lastResponse, "tp3");
+   string signal = ExtractJsonString(obj, "signal");
+
+   double entry = ExtractJsonDouble(obj, "entry");
+   double sl    = ExtractJsonDouble(obj, "sl");
+   double tp1   = ExtractJsonDouble(obj, "tp1");
+   double tp2   = ExtractJsonDouble(obj, "tp2");
+   double tp3   = ExtractJsonDouble(obj, "tp3");
 
    if(signal == "" || signal == "WAIT" || entry <= 0)
    {
