@@ -11,85 +11,185 @@ from signal_lifecycle import build_new_signal, update_signal_status
 from signal_store import get_active_signal, save_active_signal, update_active_signal
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _build_safe_levels(signal, entry, support, resistance, atr):
+    """
+    Build safe Entry / SL / TP levels.
+
+    BUY rule:
+    SL < Entry < TP1 < TP2 < TP3
+
+    SELL rule:
+    TP3 < TP2 < TP1 < Entry < SL
+
+    This protects crypto/high-price symbols from invalid SL/TP caused by bad SR values.
+    """
+
+    signal = str(signal).upper()
+    entry = _safe_float(entry)
+    support = _safe_float(support)
+    resistance = _safe_float(resistance)
+    atr = _safe_float(atr)
+
+    if entry <= 0:
+        return 0, 0, 0, 0, 0
+
+    safe_atr = atr if atr > 0 else max(entry * 0.001, 0.00001)
+    min_risk_distance = max(safe_atr * 1.2, entry * 0.001)
+
+    if signal == "BUY":
+        raw_sl = support if support > 0 else entry - min_risk_distance
+
+        if raw_sl <= 0 or raw_sl >= entry:
+            sl = entry - min_risk_distance
+        else:
+            sl = min(raw_sl, entry - min_risk_distance)
+
+        risk_distance = max(entry - sl, min_risk_distance)
+
+        tp1 = entry + risk_distance * 1.0
+        tp2 = entry + risk_distance * 1.5
+        tp3 = entry + risk_distance * 2.0
+
+        if not (sl < entry < tp1 < tp2 < tp3):
+            sl = entry - min_risk_distance
+            tp1 = entry + min_risk_distance * 1.0
+            tp2 = entry + min_risk_distance * 1.5
+            tp3 = entry + min_risk_distance * 2.0
+
+        return entry, sl, tp1, tp2, tp3
+
+    if signal == "SELL":
+        raw_sl = resistance if resistance > 0 else entry + min_risk_distance
+
+        if raw_sl <= entry:
+            sl = entry + min_risk_distance
+        else:
+            sl = max(raw_sl, entry + min_risk_distance)
+
+        risk_distance = max(sl - entry, min_risk_distance)
+
+        tp1 = entry - risk_distance * 1.0
+        tp2 = entry - risk_distance * 1.5
+        tp3 = entry - risk_distance * 2.0
+
+        if not (tp3 < tp2 < tp1 < entry < sl):
+            sl = entry + min_risk_distance
+            tp1 = entry - min_risk_distance * 1.0
+            tp2 = entry - min_risk_distance * 1.5
+            tp3 = entry - min_risk_distance * 2.0
+
+        return entry, sl, tp1, tp2, tp3
+
+    return 0, 0, 0, 0, 0
+
+
+def _empty_response(symbol, timeframe, reason):
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "signal": "WAIT",
+        "confidence": 0,
+        "strength": 0,
+        "trend": "not_enough_data",
+        "momentum": "unknown",
+        "momentum_direction": "flat",
+        "momentum_score": 0,
+        "structure": "unknown",
+        "structure_score": 0,
+        "liquidity_status": "unknown",
+        "liquidity_score": 0,
+        "support": 0,
+        "resistance": 0,
+        "sr_score": 0,
+        "volatility": "unknown",
+        "atr": 0,
+        "volatility_score": 0,
+        "session_name": "unknown",
+        "session_score": 0,
+        "regime": "unknown",
+        "regime_score": 0,
+        "danger_level": "unknown",
+        "danger_score": 0,
+        "signal_grade": "WAIT",
+        "trade_mode": "no_trade",
+        "buy_quality_score": 0,
+        "sell_quality_score": 0,
+        "direction_bias": "neutral",
+        "blocked_reasons": [reason],
+        "buy_failed_blocks": [],
+        "sell_failed_blocks": [],
+        "fusion_version": "fusion_engine_v0.2",
+        "signal_lifecycle": {
+            "has_signal": False,
+            "signal_status": "No Signal",
+            "signal_id": "",
+            "lifecycle_reason": reason
+        },
+        "entry": 0,
+        "sl": 0,
+        "tp1": 0,
+        "tp2": 0,
+        "tp3": 0,
+        "risk": "high",
+        "reason": reason,
+        "smart_no_trade_reason": reason,
+        "fusion_score": 0,
+        "fusion_reason": reason,
+        "decision_blocks": {},
+        "score_breakdown": {
+            "trend": 0,
+            "momentum": 0,
+            "structure": 0,
+            "liquidity": 0,
+            "support_resistance": 0,
+            "volatility": 0,
+            "session": 0,
+            "regime": 0,
+            "danger": 0,
+            "risk": -20
+        },
+        "strategy_version": "market_reader_v1.6",
+        "notes": "Market reader v1.6"
+    }
+
+
 def analyze_market(symbol, timeframe, candles, user_key="unknown"):
     """
-    QuantBado Market Reader v1.5
-    Adds explicit Fusion Engine v0.2 fields to the response.
-    Persistent Signal Store remains active.
+    QuantBado Market Reader v1.6
+
+    Main changes:
+    - Keeps Fusion Engine v0.2 fields.
+    - Keeps Persistent Signal Store.
+    - Fixes invalid SL/TP levels for crypto/high-price symbols.
+    - Enforces:
+      BUY:  SL < Entry < TP1 < TP2 < TP3
+      SELL: TP3 < TP2 < TP1 < Entry < SL
     """
 
     if not candles or len(candles) < 40:
-        return {
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "signal": "WAIT",
-            "confidence": 0,
-            "strength": 0,
-            "trend": "not_enough_data",
-            "momentum": "unknown",
-            "momentum_direction": "flat",
-            "momentum_score": 0,
-            "structure": "unknown",
-            "structure_score": 0,
-            "liquidity_status": "unknown",
-            "liquidity_score": 0,
-            "support": 0,
-            "resistance": 0,
-            "sr_score": 0,
-            "volatility": "unknown",
-            "atr": 0,
-            "volatility_score": 0,
-            "session_name": "unknown",
-            "session_score": 0,
-            "regime": "unknown",
-            "regime_score": 0,
-            "danger_level": "unknown",
-            "danger_score": 0,
+        return _empty_response(
+            symbol=symbol,
+            timeframe=timeframe,
+            reason="Need at least 40 candles"
+        )
 
-            "signal_grade": "WAIT",
-            "trade_mode": "no_trade",
-            "buy_quality_score": 0,
-            "sell_quality_score": 0,
-            "direction_bias": "neutral",
-            "blocked_reasons": ["Not enough candles"],
-            "buy_failed_blocks": [],
-            "sell_failed_blocks": [],
-            "fusion_version": "fusion_engine_v0.2",
+    closes = [_safe_float(c.get("close", 0)) for c in candles]
+    closes = [c for c in closes if c > 0]
 
-            "entry": 0,
-            "sl": 0,
-            "tp1": 0,
-            "tp2": 0,
-            "tp3": 0,
-            "risk": "high",
-            "reason": "Need at least 40 candles",
-            "smart_no_trade_reason": "Not enough candles for reliable analysis",
-            "fusion_score": 0,
-            "fusion_reason": "Not enough candles",
-            "decision_blocks": {},
-            "signal_lifecycle": {
-                "has_signal": False,
-                "signal_status": "No Signal",
-                "signal_id": "",
-                "lifecycle_reason": "Not enough candles"
-            },
-            "score_breakdown": {
-                "trend": 0,
-                "momentum": 0,
-                "structure": 0,
-                "liquidity": 0,
-                "support_resistance": 0,
-                "volatility": 0,
-                "session": 0,
-                "regime": 0,
-                "danger": 0,
-                "risk": -20
-            },
-            "strategy_version": "market_reader_v1.5",
-            "notes": "Market reader v1.5"
-        }
+    if len(closes) < 40:
+        return _empty_response(
+            symbol=symbol,
+            timeframe=timeframe,
+            reason="Need at least 40 valid close prices"
+        )
 
-    closes = [float(c["close"]) for c in candles]
     last_close = closes[-1]
 
     lookback = 20
@@ -136,8 +236,8 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
     liquidity_reason = liquidity_result.get("liquidity_reason", "")
 
     sr_result = analyze_support_resistance(candles)
-    support = sr_result.get("support", 0)
-    resistance = sr_result.get("resistance", 0)
+    support = _safe_float(sr_result.get("support", 0))
+    resistance = _safe_float(sr_result.get("resistance", 0))
     support_strength = sr_result.get("support_strength", 0)
     resistance_strength = sr_result.get("resistance_strength", 0)
     nearest_zone = sr_result.get("nearest_zone", "unknown")
@@ -147,7 +247,7 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
 
     volatility_result = analyze_volatility(candles)
     volatility = volatility_result.get("volatility", "unknown")
-    atr = volatility_result.get("atr", 0)
+    atr = _safe_float(volatility_result.get("atr", 0))
     atr_ratio = volatility_result.get("atr_ratio", 0)
     volatility_state = volatility_result.get("volatility_state", "unknown")
     volatility_score = volatility_result.get("volatility_score", 0)
@@ -177,11 +277,12 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
     risk_penalty = 0
     smart_no_trade_reason = ""
 
+    safe_atr_for_distance = atr if atr > 0 else max(last_close * 0.001, 0.00001)
     distance_to_resistance = resistance - last_close
     distance_to_support = last_close - support
 
-    near_resistance = distance_to_resistance < atr * 0.6 if atr else False
-    near_support = distance_to_support < atr * 0.6 if atr else False
+    near_resistance = distance_to_resistance < safe_atr_for_distance * 0.6 if resistance > 0 else False
+    near_support = distance_to_support < safe_atr_for_distance * 0.6 if support > 0 else False
 
     if volatility == "high":
         risk_penalty -= 10
@@ -260,29 +361,17 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
     fusion_version = fusion_result.get("fusion_version", "fusion_engine_v0.2")
 
     reason = fusion_reason
+
     if signal == "WAIT" and not smart_no_trade_reason:
         smart_no_trade_reason = "Fusion engine did not confirm enough aligned conditions"
 
-    entry = last_close
-
-    if signal == "BUY":
-        sl = min(support, entry - atr * 1.2) if atr else support
-        risk_distance = max(entry - sl, atr if atr else 0.00001)
-        tp1 = entry + risk_distance * 1.0
-        tp2 = entry + risk_distance * 1.5
-        tp3 = entry + risk_distance * 2.0
-    elif signal == "SELL":
-        sl = max(resistance, entry + atr * 1.2) if atr else resistance
-        risk_distance = max(sl - entry, atr if atr else 0.00001)
-        tp1 = entry - risk_distance * 1.0
-        tp2 = entry - risk_distance * 1.5
-        tp3 = entry - risk_distance * 2.0
-    else:
-        entry = 0
-        sl = 0
-        tp1 = 0
-        tp2 = 0
-        tp3 = 0
+    entry, sl, tp1, tp2, tp3 = _build_safe_levels(
+        signal=signal,
+        entry=last_close,
+        support=support,
+        resistance=resistance,
+        atr=atr
+    )
 
     existing_signal = get_active_signal(
         user_key=user_key,
@@ -301,11 +390,39 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
         )
 
         signal = lifecycle.get("signal", signal)
-        entry = float(lifecycle.get("entry", entry))
-        sl = float(lifecycle.get("sl", sl))
-        tp1 = float(lifecycle.get("tp1", tp1))
-        tp2 = float(lifecycle.get("tp2", tp2))
-        tp3 = float(lifecycle.get("tp3", tp3))
+        entry = _safe_float(lifecycle.get("entry", entry))
+        sl = _safe_float(lifecycle.get("sl", sl))
+        tp1 = _safe_float(lifecycle.get("tp1", tp1))
+        tp2 = _safe_float(lifecycle.get("tp2", tp2))
+        tp3 = _safe_float(lifecycle.get("tp3", tp3))
+
+        # Protect old stored signals that may contain invalid SL/TP.
+        fixed_entry, fixed_sl, fixed_tp1, fixed_tp2, fixed_tp3 = _build_safe_levels(
+            signal=signal,
+            entry=entry,
+            support=support,
+            resistance=resistance,
+            atr=atr
+        )
+
+        if signal == "BUY" and not (fixed_sl < fixed_entry < fixed_tp1 < fixed_tp2 < fixed_tp3):
+            entry, sl, tp1, tp2, tp3 = fixed_entry, fixed_sl, fixed_tp1, fixed_tp2, fixed_tp3
+
+        if signal == "SELL" and not (fixed_tp3 < fixed_tp2 < fixed_tp1 < fixed_entry < fixed_sl):
+            entry, sl, tp1, tp2, tp3 = fixed_entry, fixed_sl, fixed_tp1, fixed_tp2, fixed_tp3
+
+        lifecycle["entry"] = round(entry, 5)
+        lifecycle["sl"] = round(sl, 5)
+        lifecycle["tp1"] = round(tp1, 5)
+        lifecycle["tp2"] = round(tp2, 5)
+        lifecycle["tp3"] = round(tp3, 5)
+
+        update_active_signal(
+            user_key=user_key,
+            symbol=symbol,
+            timeframe=timeframe,
+            signal_data=lifecycle
+        )
 
         reason = "Existing active signal is being tracked"
         smart_no_trade_reason = lifecycle.get("lifecycle_reason", smart_no_trade_reason)
@@ -443,6 +560,6 @@ def analyze_market(symbol, timeframe, candles, user_key="unknown"):
             "danger": danger_penalty,
             "risk": risk_penalty
         },
-        "strategy_version": "market_reader_v1.5",
-        "notes": "Market reader v1.5"
+        "strategy_version": "market_reader_v1.6",
+        "notes": "Market reader v1.6 - safe SL/TP"
     }

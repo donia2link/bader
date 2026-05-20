@@ -1,79 +1,96 @@
 from datetime import datetime, timezone
 
 
-def _utc_hour():
-    return datetime.now(timezone.utc).hour
+CRYPTO_KEYWORDS = [
+    "BTC",
+    "ETH",
+    "XRP",
+    "LTC",
+    "BCH",
+    "ADA",
+    "DOT",
+    "SOL",
+    "DOGE",
+    "BNB",
+    "AVAX",
+    "MATIC",
+    "USDT",
+    "USDC"
+]
 
 
-def analyze_session(symbol=None, timeframe=None):
+def is_crypto_symbol(symbol):
+    symbol = str(symbol).upper()
+
+    for keyword in CRYPTO_KEYWORDS:
+        if keyword in symbol:
+            return True
+
+    return False
+
+
+def analyze_session(symbol="", timeframe=""):
     """
-    QuantBado Session Engine v0.1
+    QuantBado Session Engine v0.2
 
-    UTC-based session logic:
-    - Asia: 00:00 - 07:00 UTC
-    - London: 07:00 - 12:00 UTC
-    - London/New York overlap: 12:00 - 16:00 UTC
-    - New York: 16:00 - 21:00 UTC
-    - Dead hours: 21:00 - 00:00 UTC
+    v0.2:
+    - Crypto symbols are treated as 24/7 active markets.
+    - Forex/metals still use session-based scoring.
     """
 
-    hour = _utc_hour()
+    now = datetime.now(timezone.utc)
+    hour = now.hour
 
-    session_name = "unknown"
-    session_status = "unknown"
-    session_score = 0
-    reason_parts = []
+    if is_crypto_symbol(symbol):
+        return {
+            "session_name": "crypto_24_7",
+            "session_status": "active",
+            "session_score": 10,
+            "session_hour_utc": hour,
+            "session_reason": "Crypto market is active 24/7"
+        }
 
-    if 0 <= hour < 7:
+    # UTC session logic
+    if 0 <= hour < 6:
         session_name = "asia"
         session_status = "active"
         session_score = 5
-        reason_parts.append("Asia session is active")
+        session_reason = "Asia session is active"
 
-        if symbol in ["XAUUSD", "EURUSD", "GBPUSD"]:
-            session_score -= 5
-            reason_parts.append("This symbol may move slower during Asia session")
+    elif 6 <= hour < 8:
+        session_name = "london_open"
+        session_status = "active"
+        session_score = 15
+        session_reason = "London open session is active"
 
-    elif 7 <= hour < 12:
+    elif 8 <= hour < 13:
         session_name = "london"
         session_status = "active"
-        session_score = 15
-        reason_parts.append("London session is active")
+        session_score = 10
+        session_reason = "London session is active"
 
-    elif 12 <= hour < 16:
-        session_name = "london_new_york_overlap"
-        session_status = "high_activity"
+    elif 13 <= hour < 17:
+        session_name = "new_york_overlap"
+        session_status = "active"
         session_score = 20
-        reason_parts.append("London and New York overlap is active")
+        session_reason = "London/New York overlap is active"
 
-    elif 16 <= hour < 21:
+    elif 17 <= hour < 21:
         session_name = "new_york"
         session_status = "active"
-        session_score = 15
-        reason_parts.append("New York session is active")
+        session_score = 10
+        session_reason = "New York session is active"
 
     else:
         session_name = "dead_hours"
         session_status = "low_activity"
         session_score = -10
-        reason_parts.append("Market is in dead hours")
-
-    if timeframe in ["M1", "M5"] and session_status == "low_activity":
-        session_score -= 10
-        reason_parts.append("Scalping during dead hours is risky")
-
-    if timeframe in ["H4", "D1"]:
-        session_score += 5
-        reason_parts.append("Higher timeframe analysis is less sensitive to session noise")
-
-    session_score = max(-30, min(30, session_score))
+        session_reason = "Market is in dead hours"
 
     return {
         "session_name": session_name,
         "session_status": session_status,
         "session_score": session_score,
         "session_hour_utc": hour,
-        "session_reason": " | ".join(reason_parts)
+        "session_reason": session_reason
     }
-
-
