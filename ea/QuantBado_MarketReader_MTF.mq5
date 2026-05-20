@@ -29,6 +29,8 @@ int OnInit()
    Print("Symbol: ", _Symbol);
    Print("Reader only. No trading functions.");
 
+   SendMTFRequest();
+
    return(INIT_SUCCEEDED);
 }
 
@@ -166,7 +168,12 @@ void SendMTFRequest()
    string headers = "Content-Type: application/json\r\n";
    string resultHeaders = "";
 
-   StringToCharArray(body, post, 0, WHOLE_ARRAY, CP_UTF8);
+   // IMPORTANT:
+   // Do not use WHOLE_ARRAY here.
+   // WHOLE_ARRAY adds null/extra bytes and FastAPI returns 422 JSON decode error.
+   int bodyLen = StringLen(body);
+   ArrayResize(post, bodyLen);
+   StringToCharArray(body, post, 0, bodyLen, CP_UTF8);
 
    ResetLastError();
 
@@ -283,3 +290,4 @@ void DrawPanel()
 
    Comment(text);
 }
+//+------------------------------------------------------------------+

@@ -1,7 +1,10 @@
 from market_reader import analyze_market
+from signal_lifecycle import build_new_signal, update_signal_status
+from signal_store import get_active_signal, save_active_signal, update_active_signal
 
 
 DEFAULT_TIMEFRAMES = ["M1", "M5", "M15", "H1"]
+MTF_TIMEFRAME_KEY = "MTF"
 
 
 def _safe_float(value, default=0.0):
@@ -13,18 +16,6 @@ def _safe_float(value, default=0.0):
 
 def _get_result(results, timeframe):
     return results.get(timeframe, {})
-
-
-def _direction_from_signal(signal):
-    signal = str(signal).upper()
-
-    if signal == "BUY":
-        return "buy"
-
-    if signal == "SELL":
-        return "sell"
-
-    return "neutral"
 
 
 def _score_direction(results):
@@ -155,8 +146,21 @@ def _build_mtf_levels(results, direction, entry_tf):
     atr = _safe_float(entry_result.get("atr", 0))
 
     if entry <= 0:
-        last_close = _safe_float(entry_result.get("support", 0))
-        entry = last_close
+        support = _safe_float(entry_result.get("support", 0))
+        resistance = _safe_float(entry_result.get("resistance", 0))
+
+        if support > 0 and resistance > 0:
+            entry = (support + resistance) / 2
+
+    if entry <= 0:
+        return {
+            "entry": 0,
+            "sl": 0,
+            "tp1": 0,
+            "tp2": 0,
+            "tp3": 0,
+            "atr": round(atr, 5)
+        }
 
     safe_atr = atr if atr > 0 else max(entry * 0.001, 0.00001)
     max_risk_distance = safe_atr * 2.0
@@ -195,20 +199,53 @@ def _build_mtf_levels(results, direction, entry_tf):
     }
 
 
-def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
-    """
-    QuantBado Multi-Timeframe Engine v0.1
+def _last_price_from_results(results, entry_tf):
+    result = _get_result(results, entry_tf)
 
-    Input:
-    candles_by_timeframe = {
-        "M1": [...],
-        "M5": [...],
-        "M15": [...],
-        "H1": [...]
+    entry = _safe_float(result.get("entry", 0))
+    if entry > 0:
+        return entry
+
+    for tf in ["M1", "M5", "M15", "H1"]:
+        r = _get_result(results, tf)
+        value = _safe_float(r.get("entry", 0))
+        if value > 0:
+            return value
+
+    return 0
+
+
+def _build_wait_response(symbol, results, direction_score, reason):
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "signal": "WAIT",
+        "confidence": 0,
+        "bias": "neutral",
+        "reason": reason,
+        "buy_score": direction_score["buy_score"],
+        "sell_score": direction_score["sell_score"],
+        "timeframe_results": results,
+        "direction_details": direction_score["details"],
+        "signal_lifecycle": {
+            "has_signal": False,
+            "signal_status": "No Signal",
+            "signal_id": "",
+            "lifecycle_reason": reason
+        },
+        "mtf_version": "multi_timeframe_engine_v0.2"
     }
 
-    Output:
-    one combined market decision independent from chart timeframe.
+
+def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
+    """
+    QuantBado Multi-Timeframe Engine v0.2
+
+    v0.2:
+    - Combines M1/M5/M15/H1 into one decision.
+    - Saves MTF active signal using timeframe key: MTF.
+    - Tracks TP1/TP2 as partial.
+    - Records TP3/SL/Expired through signal_store/performance.
     """
 
     results = {}
@@ -230,7 +267,7 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
         return {
             "status": "error",
             "message": "No timeframe candle data provided",
-            "mtf_version": "multi_timeframe_engine_v0.1"
+            "mtf_version": "multi_timeframe_engine_v0.2"
         }
 
     direction_score = _score_direction(results)
@@ -253,26 +290,98 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
         final_signal = "WAIT"
         final_bias = "neutral"
 
-    if final_signal == "WAIT":
+    existing_signal = get_active_signal(
+        user_key=user_key,
+        symbol=symbol,
+        timeframe=MTF_TIMEFRAME_KEY
+    )
+
+    entry_tf = _select_entry_timeframe(results, final_signal if final_signal != "WAIT" else "BUY")
+    current_price = _last_price_from_results(results, entry_tf)
+
+    if existing_signal:
+        lifecycle = update_signal_status(existing_signal, current_price)
+
+        update_active_signal(
+            user_key=user_key,
+            symbol=symbol,
+            timeframe=MTF_TIMEFRAME_KEY,
+            signal_data=lifecycle
+        )
+
         return {
             "status": "ok",
             "symbol": symbol,
-            "signal": "WAIT",
-            "confidence": 0,
-            "bias": final_bias,
-            "reason": "Multi-timeframe scores are not aligned enough",
+            "signal": lifecycle.get("signal", "WAIT"),
+            "confidence": lifecycle.get("confidence", 0),
+            "bias": lifecycle.get("signal", "WAIT").lower(),
+            "entry_timeframe": lifecycle.get("entry_timeframe", entry_tf),
+            "entry": lifecycle.get("entry", 0),
+            "sl": lifecycle.get("sl", 0),
+            "tp1": lifecycle.get("tp1", 0),
+            "tp2": lifecycle.get("tp2", 0),
+            "tp3": lifecycle.get("tp3", 0),
+            "max_tp_hit": lifecycle.get("max_tp_hit", "none"),
             "buy_score": buy_score,
             "sell_score": sell_score,
+            "reason": "Existing MTF active signal is being tracked",
+            "signal_lifecycle": lifecycle,
             "timeframe_results": results,
             "direction_details": direction_score["details"],
-            "mtf_version": "multi_timeframe_engine_v0.1"
+            "mtf_version": "multi_timeframe_engine_v0.2"
         }
+
+    if final_signal == "WAIT":
+        return _build_wait_response(
+            symbol=symbol,
+            results=results,
+            direction_score=direction_score,
+            reason="Multi-timeframe scores are not aligned enough"
+        )
 
     entry_tf = _select_entry_timeframe(results, final_signal)
     levels = _build_mtf_levels(results, final_signal, entry_tf)
 
+    if levels["entry"] <= 0:
+        return _build_wait_response(
+            symbol=symbol,
+            results=results,
+            direction_score=direction_score,
+            reason="MTF levels invalid, no trade"
+        )
+
     confidence_gap = abs(buy_score - sell_score)
     confidence = min(100, max(50, confidence_gap * 5))
+
+    lifecycle = build_new_signal(
+        user_key=user_key,
+        symbol=symbol,
+        timeframe=MTF_TIMEFRAME_KEY,
+        signal=final_signal,
+        confidence=round(confidence, 2),
+        entry=levels["entry"],
+        sl=levels["sl"],
+        tp1=levels["tp1"],
+        tp2=levels["tp2"],
+        tp3=levels["tp3"],
+        reason=f"MTF {final_signal} selected from {entry_tf}",
+        ttl_minutes=60
+    )
+
+    lifecycle["entry_timeframe"] = entry_tf
+    lifecycle["mtf_signal"] = True
+    lifecycle["buy_score"] = buy_score
+    lifecycle["sell_score"] = sell_score
+    lifecycle["direction_details"] = direction_score["details"]
+
+    lifecycle = update_signal_status(lifecycle, current_price)
+
+    save_active_signal(
+        user_key=user_key,
+        symbol=symbol,
+        timeframe=MTF_TIMEFRAME_KEY,
+        signal_data=lifecycle
+    )
 
     return {
         "status": "ok",
@@ -287,10 +396,12 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
         "tp2": levels["tp2"],
         "tp3": levels["tp3"],
         "atr": levels["atr"],
+        "max_tp_hit": lifecycle.get("max_tp_hit", "none"),
         "buy_score": buy_score,
         "sell_score": sell_score,
         "reason": f"Multi-timeframe {final_signal} selected from {entry_tf}",
+        "signal_lifecycle": lifecycle,
         "timeframe_results": results,
         "direction_details": direction_score["details"],
-        "mtf_version": "multi_timeframe_engine_v0.1"
+        "mtf_version": "multi_timeframe_engine_v0.2"
     }
