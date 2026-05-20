@@ -2,7 +2,9 @@ from datetime import datetime, timezone, timedelta
 import uuid
 
 
-FINAL_STATUSES = ["TP1 Hit", "TP2 Hit", "TP3 Hit", "SL Hit", "Expired"]
+FINAL_STATUSES = ["TP3 Hit", "SL Hit", "Expired"]
+PARTIAL_STATUSES = ["TP1 Hit", "TP2 Hit"]
+ALL_HIT_STATUSES = ["TP1 Hit", "TP2 Hit", "TP3 Hit", "SL Hit", "Expired"]
 
 
 def utc_now():
@@ -51,6 +53,7 @@ def build_new_signal(
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
+        "max_tp_hit": "none",
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
         "expires_at": expires_at.isoformat(),
@@ -75,33 +78,51 @@ def _is_expired(signal_data):
     return utc_now() >= expires_at
 
 
-def _mark(signal_data, status, reason):
+def _mark(signal_data, status, reason, max_tp_hit=None):
     signal_data["signal_status"] = status
     signal_data["updated_at"] = utc_now_iso()
     signal_data["lifecycle_reason"] = reason
+
+    if max_tp_hit:
+        signal_data["max_tp_hit"] = max_tp_hit
+
     return signal_data
+
+
+def _current_max_tp(signal_data):
+    return signal_data.get("max_tp_hit", "none")
+
+
+def _tp_rank(tp):
+    ranks = {
+        "none": 0,
+        "TP1 Hit": 1,
+        "TP2 Hit": 2,
+        "TP3 Hit": 3
+    }
+    return ranks.get(tp, 0)
+
+
+def _upgrade_tp(signal_data, new_tp):
+    old_tp = _current_max_tp(signal_data)
+
+    if _tp_rank(new_tp) > _tp_rank(old_tp):
+        signal_data["max_tp_hit"] = new_tp
+
+    return signal_data.get("max_tp_hit", new_tp)
 
 
 def update_signal_status(signal_data, current_price):
     """
-    Updates signal status based on current market price.
+    QuantBado Signal Lifecycle v0.3
 
-    v0.2:
-    - BUY:
-      SL if price <= SL
-      TP3 if price >= TP3
-      TP2 if price >= TP2
-      TP1 if price >= TP1
-      Active if price > Entry
-      Waiting Confirmation otherwise
-
-    - SELL:
-      SL if price >= SL
-      TP3 if price <= TP3
-      TP2 if price <= TP2
-      TP1 if price <= TP1
-      Active if price < Entry
-      Waiting Confirmation otherwise
+    v0.3 logic:
+    - TP1 Hit is partial, signal stays active.
+    - TP2 Hit is partial, signal stays active.
+    - TP3 Hit is final.
+    - SL Hit is final.
+    - Expired is final.
+    - max_tp_hit tracks the highest target reached.
     """
 
     if not signal_data or not signal_data.get("has_signal"):
@@ -114,13 +135,29 @@ def update_signal_status(signal_data, current_price):
 
     current_status = signal_data.get("signal_status")
 
-    if current_status in FINAL_STATUSES or current_status == "TP Hit":
-        if current_status == "TP Hit":
-            return _mark(signal_data, "TP1 Hit", "Legacy TP Hit normalized to TP1 Hit")
+    if current_status in FINAL_STATUSES:
         return signal_data
 
+    if current_status == "TP Hit":
+        signal_data["signal_status"] = "TP1 Hit"
+        signal_data["max_tp_hit"] = "TP1 Hit"
+
     if _is_expired(signal_data):
-        return _mark(signal_data, "Expired", "Signal expired before hitting target or stop")
+        max_tp = _current_max_tp(signal_data)
+
+        if max_tp in ["TP1 Hit", "TP2 Hit"]:
+            return _mark(
+                signal_data,
+                max_tp,
+                f"Signal expired after reaching {max_tp}",
+                max_tp_hit=max_tp
+            )
+
+        return _mark(
+            signal_data,
+            "Expired",
+            "Signal expired before hitting target or stop"
+        )
 
     side = signal_data.get("signal")
     entry = float(signal_data.get("entry", 0))
@@ -135,15 +172,21 @@ def update_signal_status(signal_data, current_price):
             return _mark(signal_data, "SL Hit", "BUY signal hit stop loss")
 
         if tp3 > 0 and price >= tp3:
-            return _mark(signal_data, "TP3 Hit", "BUY signal reached TP3 zone")
+            max_tp = _upgrade_tp(signal_data, "TP3 Hit")
+            return _mark(signal_data, "TP3 Hit", "BUY signal reached TP3 zone", max_tp)
 
         if tp2 > 0 and price >= tp2:
-            return _mark(signal_data, "TP2 Hit", "BUY signal reached TP2 zone")
+            max_tp = _upgrade_tp(signal_data, "TP2 Hit")
+            return _mark(signal_data, "TP2 Hit", "BUY signal reached TP2 zone, waiting for TP3", max_tp)
 
         if tp1 > 0 and price >= tp1:
-            return _mark(signal_data, "TP1 Hit", "BUY signal reached TP1 zone")
+            max_tp = _upgrade_tp(signal_data, "TP1 Hit")
+            return _mark(signal_data, "TP1 Hit", "BUY signal reached TP1 zone, waiting for TP2/TP3", max_tp)
 
         if entry > 0 and price > entry:
+            current_max = _current_max_tp(signal_data)
+            if current_max in ["TP1 Hit", "TP2 Hit"]:
+                return _mark(signal_data, current_max, f"BUY signal holding after {current_max}", current_max)
             return _mark(signal_data, "Active", "BUY signal active and moving above entry")
 
         return _mark(signal_data, "Waiting Confirmation", "BUY signal waiting for price confirmation")
@@ -153,15 +196,21 @@ def update_signal_status(signal_data, current_price):
             return _mark(signal_data, "SL Hit", "SELL signal hit stop loss")
 
         if tp3 > 0 and price <= tp3:
-            return _mark(signal_data, "TP3 Hit", "SELL signal reached TP3 zone")
+            max_tp = _upgrade_tp(signal_data, "TP3 Hit")
+            return _mark(signal_data, "TP3 Hit", "SELL signal reached TP3 zone", max_tp)
 
         if tp2 > 0 and price <= tp2:
-            return _mark(signal_data, "TP2 Hit", "SELL signal reached TP2 zone")
+            max_tp = _upgrade_tp(signal_data, "TP2 Hit")
+            return _mark(signal_data, "TP2 Hit", "SELL signal reached TP2 zone, waiting for TP3", max_tp)
 
         if tp1 > 0 and price <= tp1:
-            return _mark(signal_data, "TP1 Hit", "SELL signal reached TP1 zone")
+            max_tp = _upgrade_tp(signal_data, "TP1 Hit")
+            return _mark(signal_data, "TP1 Hit", "SELL signal reached TP1 zone, waiting for TP2/TP3", max_tp)
 
         if entry > 0 and price < entry:
+            current_max = _current_max_tp(signal_data)
+            if current_max in ["TP1 Hit", "TP2 Hit"]:
+                return _mark(signal_data, current_max, f"SELL signal holding after {current_max}", current_max)
             return _mark(signal_data, "Active", "SELL signal active and moving below entry")
 
         return _mark(signal_data, "Waiting Confirmation", "SELL signal waiting for price confirmation")

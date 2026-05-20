@@ -1,7 +1,7 @@
 import sys
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Dict
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 sys.path.append("C:/QuantProject/engine")
 
 from market_reader import analyze_market
+from multi_timeframe_engine import analyze_multi_timeframe
 from symbol_engine import get_symbol_info
 from time_sync import utc_now_iso
 from event_bus import emit_analyze_request, emit_engine_error, emit_user_connected
@@ -26,7 +27,7 @@ from performance_engine import build_performance_summary, reset_performance_reco
 
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="2.3.0"
+    version="2.4.0"
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -51,6 +52,12 @@ class AnalyzeRequest(BaseModel):
     symbol: str
     timeframe: str
     candles: List[Candle]
+
+
+class AnalyzeMTFRequest(BaseModel):
+    user_key: str = Field(..., min_length=3)
+    symbol: str
+    candles_by_timeframe: Dict[str, List[Candle]]
 
 
 class AdminRequest(BaseModel):
@@ -154,7 +161,7 @@ def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "2.3.0",
+        "version": "2.4.0",
         "time_utc": utc_now_iso()
     }
 
@@ -164,7 +171,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "2.3.0",
+        "version": "2.4.0",
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -193,7 +200,7 @@ def admin_system_status(data: AdminRequest):
 
     return {
         "status": "ok",
-        "api_version": "2.3.0",
+        "api_version": "2.4.0",
         "server_time_utc": utc_now_iso(),
         "files": {
             "settings_file_exists": CONFIG_FILE.exists(),
@@ -406,6 +413,97 @@ def admin_force_close_signal(data: ForceCloseSignalRequest):
     }
 
 
+@app.post("/analyze-mtf")
+def analyze_mtf(data: AnalyzeMTFRequest):
+    request_time = utc_now_iso()
+
+    users = load_users()
+
+    if data.user_key not in users:
+        return {
+            "status": "error",
+            "code": "INVALID_USER_KEY",
+            "message": "Invalid user key",
+            "server_time_utc": request_time
+        }
+
+    user = users[data.user_key]
+
+    if not user.get("active", False):
+        return {
+            "status": "error",
+            "code": "INACTIVE_USER",
+            "message": "User account is inactive",
+            "server_time_utc": request_time
+        }
+
+    candles_by_timeframe = {}
+
+    for timeframe, candles in data.candles_by_timeframe.items():
+        candles_by_timeframe[timeframe.upper()] = [c.model_dump() for c in candles]
+
+    symbol_info = get_symbol_info(data.symbol)
+
+    try:
+        emit_user_connected(
+            user_key=data.user_key,
+            symbol=symbol_info["normalized_symbol"]
+        )
+
+        result = analyze_multi_timeframe(
+            symbol=symbol_info["normalized_symbol"],
+            candles_by_timeframe=candles_by_timeframe,
+            user_key=data.user_key
+        )
+
+        response = {
+            "status": "ok",
+            "user": user.get("name", "Unknown"),
+            "symbol": data.symbol,
+            "normalized_symbol": symbol_info["normalized_symbol"],
+            "asset_class": symbol_info["asset_class"],
+            "server_time_utc": request_time,
+            **result
+        }
+
+        write_market_log({
+            "event": "ANALYZE_MTF_REQUEST",
+            "time_utc": request_time,
+            "user_key": data.user_key,
+            "user_name": user.get("name", "Unknown"),
+            "symbol": data.symbol,
+            "normalized_symbol": symbol_info["normalized_symbol"],
+            "asset_class": symbol_info["asset_class"],
+            "timeframes": list(candles_by_timeframe.keys()),
+            "result": result
+        })
+
+        return response
+
+    except Exception as e:
+        emit_engine_error(
+            user_key=data.user_key,
+            symbol=data.symbol,
+            timeframe="MTF",
+            error=e
+        )
+
+        write_market_log({
+            "event": "ANALYZE_MTF_ERROR",
+            "time_utc": request_time,
+            "user_key": data.user_key,
+            "symbol": data.symbol,
+            "error": str(e)
+        })
+
+        return {
+            "status": "error",
+            "code": "MTF_ENGINE_ERROR",
+            "message": str(e),
+            "server_time_utc": request_time
+        }
+
+
 @app.post("/analyze")
 def analyze(data: AnalyzeRequest):
     request_time = utc_now_iso()
@@ -511,16 +609,14 @@ def analyze(data: AnalyzeRequest):
             error=e
         )
 
-        error_payload = {
+        write_market_log({
             "event": "ANALYZE_ERROR",
             "time_utc": request_time,
             "user_key": data.user_key,
             "symbol": data.symbol,
             "timeframe": data.timeframe,
             "error": str(e)
-        }
-
-        write_market_log(error_payload)
+        })
 
         return {
             "status": "error",
