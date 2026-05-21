@@ -5,8 +5,8 @@
 //| Reader only - no trading orders                                  |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.0"
-#property description "QuantBado Frame Reader - per timeframe analysis panel - reader only"
+#property version   "1.1"
+#property description "QuantBado Frame Reader - clean per timeframe panel - reader only"
 
 input string InpServerUrl = "http://quantbado.online/frame-reader";
 input string InpUserKey   = "test123";
@@ -32,7 +32,7 @@ int OnInit()
 {
    EventSetTimer(InpTimerSec);
 
-   Print("QuantBado Frame Reader EA v1.0 started.");
+   Print("QuantBado Frame Reader EA v1.1 started.");
    Print("Server URL: ", InpServerUrl);
    Print("Symbol: ", _Symbol);
    Print("Reader only. No trading functions.");
@@ -458,6 +458,34 @@ void CreateLabel(string name, string text, int x, int y, color clr, int size = 9
 }
 
 //+------------------------------------------------------------------+
+//| Display helpers                                                  |
+//+------------------------------------------------------------------+
+string CleanQuality(string q)
+{
+   if(q == "")
+      return "WAIT";
+
+   if(StringLen(q) > 18)
+      return StringSubstr(q, 0, 18);
+
+   return q;
+}
+
+bool IsTradableSetup(string setup, double entry, double score)
+{
+   if(setup != "BUY" && setup != "SELL")
+      return false;
+
+   if(entry <= 0)
+      return false;
+
+   if(score < 35)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| Panel rows                                                       |
 //+------------------------------------------------------------------+
 void DrawFrameBox(string tf, int x, int y, int w)
@@ -482,28 +510,30 @@ void DrawFrameBox(string tf, int x, int y, int w)
    if(quality == "")
       quality = "No Data";
 
-   color border = SignalColor(setup);
+   bool tradable = IsTradableSetup(setup, entry, score);
+
+   color border = tradable ? SignalColor(setup) : MutedTextColor();
    color txt = PanelTextColor();
    color muted = MutedTextColor();
 
-   CreateRect("BOX_" + tf, x, y, w, 68, CardBgColor(), border);
+   CreateRect("BOX_" + tf, x, y, w, 64, CardBgColor(), border);
 
-   CreateLabel("TF_" + tf, tf, x + 8, y + 6, border, 11, true);
-   CreateLabel("SETUP_" + tf, setup, x + 45, y + 6, SignalColor(setup), 10, true);
-   CreateLabel("TREND_" + tf, "Trend: " + trend, x + 122, y + 7, SignalColor(trend), 8, false);
+   CreateLabel("TF_" + tf, tf, x + 8, y + 6, tradable ? SignalColor(setup) : muted, 10, true);
+   CreateLabel("SETUP_" + tf, tradable ? setup : "WAIT", x + 45, y + 6, tradable ? SignalColor(setup) : WaitColor(), 9, true);
+   CreateLabel("TREND_" + tf, "Trend: " + trend, x + 112, y + 7, SignalColor(trend), 8, false);
    CreateLabel("SCORE_" + tf, "Score " + DoubleToString(score, 1), x + w - 70, y + 7, muted, 8, false);
 
-   CreateLabel("Q_" + tf, quality, x + 8, y + 26, SignalColor(quality), 9, false);
+   CreateLabel("Q_" + tf, CleanQuality(quality), x + 8, y + 25, tradable ? SignalColor(setup) : muted, 8, false);
 
-   if(setup == "WAIT" || entry <= 0)
+   if(!tradable)
    {
-      CreateLabel("E_" + tf, "Entry: waiting setup", x + 8, y + 45, muted, 8, false);
-      CreateLabel("T_" + tf, "TP / SL: --", x + 150, y + 45, muted, 8, false);
+      CreateLabel("E_" + tf, "Entry: no valid setup", x + 8, y + 43, muted, 8, false);
+      CreateLabel("T_" + tf, "TP / SL: --", x + 168, y + 43, muted, 8, false);
       return;
    }
 
-   CreateLabel("E_" + tf, "Entry: " + DoubleToString(entry, _Digits), x + 8, y + 45, txt, 8, false);
-   CreateLabel("T_" + tf, "TP: " + DoubleToString(target, _Digits) + " / SL: " + DoubleToString(sl, _Digits), x + 150, y + 45, txt, 8, false);
+   CreateLabel("E_" + tf, "Entry: " + DoubleToString(entry, _Digits), x + 8, y + 43, txt, 8, false);
+   CreateLabel("T_" + tf, "TP: " + DoubleToString(target, _Digits) + " / SL: " + DoubleToString(sl, _Digits), x + 168, y + 43, txt, 8, false);
 }
 
 //+------------------------------------------------------------------+
@@ -512,18 +542,20 @@ void DrawPanel()
    int x = InpPanelX;
    int y = InpPanelY;
    int w = 330;
-   int h = 570;
+   int h = 548;
 
    string bias = ExtractJsonString(g_lastResponse, "overall_bias");
    string version = ExtractJsonString(g_lastResponse, "reader_version");
 
    string bestObj = ExtractObject(g_lastResponse, "best_opportunity");
    string bestTf = ExtractJsonString(bestObj, "timeframe");
-   string bestSignal = ExtractJsonString(bestObj, "setup_direction");
+   string bestSetup = ExtractJsonString(bestObj, "setup_direction");
    string bestQuality = ExtractJsonString(bestObj, "quality");
+   double bestScore = ExtractJsonDouble(bestObj, "score");
+   double bestEntry = ExtractJsonDouble(bestObj, "entry");
 
-   if(bestSignal == "")
-      bestSignal = ExtractJsonString(bestObj, "signal");
+   if(bestSetup == "")
+      bestSetup = ExtractJsonString(bestObj, "signal");
 
    if(bias == "")
       bias = "NEUTRAL";
@@ -531,11 +563,14 @@ void DrawPanel()
    if(version == "")
       version = "frame_reader";
 
-   if(bestTf == "")
-      bestTf = "NONE";
+   bool hasBest = IsTradableSetup(bestSetup, bestEntry, bestScore);
 
-   if(bestQuality == "")
+   if(!hasBest)
+   {
+      bestTf = "NONE";
       bestQuality = "No clear opportunity";
+      bestSetup = "WAIT";
+   }
 
    CreateRect("MAIN_BG", x, y, w, h, PanelBgColor(), BorderColor());
    CreateRect("HEADER", x, y, w, 58, HeaderColor(), HeaderColor());
@@ -544,28 +579,28 @@ void DrawPanel()
    CreateLabel("TIME", TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), x + 12, y + 31, clrWhite, 8, false);
 
    CreateLabel("BIAS", "BIAS: " + bias, x + 195, y + 9, SignalColor(bias), 10, true);
-   CreateLabel("BEST", "Best: " + bestTf + " " + bestQuality, x + 195, y + 31, clrWhite, 8, false);
+   CreateLabel("BEST", "Best: " + bestTf + " " + CleanQuality(bestQuality), x + 195, y + 31, clrWhite, 8, false);
 
    int rowY = y + 68;
    int rowW = w - 16;
 
    DrawFrameBox("D1", x + 8, rowY, rowW);
-   rowY += 74;
+   rowY += 68;
 
    DrawFrameBox("H4", x + 8, rowY, rowW);
-   rowY += 74;
+   rowY += 68;
 
    DrawFrameBox("H1", x + 8, rowY, rowW);
-   rowY += 74;
+   rowY += 68;
 
    DrawFrameBox("M30", x + 8, rowY, rowW);
-   rowY += 74;
+   rowY += 68;
 
    DrawFrameBox("M15", x + 8, rowY, rowW);
-   rowY += 74;
+   rowY += 68;
 
    DrawFrameBox("M5", x + 8, rowY, rowW);
-   rowY += 74;
+   rowY += 68;
 
    DrawFrameBox("M1", x + 8, rowY, rowW);
 
@@ -656,11 +691,12 @@ void DrawTradeLines()
    double entry = ExtractJsonDouble(obj, "entry");
    double sl = ExtractJsonDouble(obj, "sl");
    double target = ExtractJsonDouble(obj, "target");
+   double score = ExtractJsonDouble(obj, "score");
 
    if(setup == "")
       setup = signal;
 
-   if(setup == "" || setup == "WAIT" || entry <= 0)
+   if(!IsTradableSetup(setup, entry, score))
    {
       DeleteTradeLines();
       return;
