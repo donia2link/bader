@@ -1,7 +1,7 @@
 from market_reader import analyze_market
 
 
-FRAME_READER_VERSION = "frame_reader_v1.0"
+FRAME_READER_VERSION = "frame_reader_v1.1"
 
 DEFAULT_FRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
 
@@ -19,13 +19,6 @@ FRAME_WEIGHTS = {
 def _safe_float(value, default=0.0):
     try:
         return float(value)
-    except Exception:
-        return default
-
-
-def _safe_int(value, default=0):
-    try:
-        return int(value)
     except Exception:
         return default
 
@@ -71,27 +64,61 @@ def _setup_direction(result):
     sell_quality = _safe_float(result.get("sell_quality_score", 0))
     trend_dir = _trend_direction(result)
 
-    if buy_quality >= sell_quality + 8:
+    buy_blocks = result.get("buy_failed_blocks", [])
+    sell_blocks = result.get("sell_failed_blocks", [])
+
+    if buy_quality >= sell_quality + 12 and len(buy_blocks) <= 2:
         return "BUY"
 
-    if sell_quality >= buy_quality + 8:
+    if sell_quality >= buy_quality + 12 and len(sell_blocks) <= 2:
         return "SELL"
 
-    if trend_dir == "UP":
+    if trend_dir == "UP" and buy_quality >= 70 and len(buy_blocks) <= 2:
         return "BUY"
 
-    if trend_dir == "DOWN":
+    if trend_dir == "DOWN" and sell_quality >= 70 and len(sell_blocks) <= 2:
         return "SELL"
 
     return "WAIT"
+
+
+def _is_blocked_hard(result, setup):
+    dead_market = bool(result.get("dead_market", False))
+    danger_level = result.get("danger_level", "low")
+    session_status = result.get("session_status", "unknown")
+    blocked_reasons = result.get("blocked_reasons", [])
+
+    if dead_market:
+        return True, "Dead market"
+
+    if danger_level == "high":
+        return True, "High danger"
+
+    if "Low activity session" in blocked_reasons:
+        return True, "Low activity"
+
+    if setup == "BUY":
+        failed = result.get("buy_failed_blocks", [])
+        hard_blocks = {"not_near_resistance_zone", "not_near_resistance", "danger_ok", "session_ok"}
+        if len(set(failed).intersection(hard_blocks)) >= 2:
+            return True, "BUY blocked"
+
+    if setup == "SELL":
+        failed = result.get("sell_failed_blocks", [])
+        hard_blocks = {"not_near_support_zone", "not_near_support", "danger_ok", "session_ok"}
+        if len(set(failed).intersection(hard_blocks)) >= 2:
+            return True, "SELL blocked"
+
+    if session_status == "low_activity":
+        return True, "Low activity"
+
+    return False, ""
 
 
 def _quality(result):
     signal = result.get("signal", "WAIT")
     confidence = _safe_float(result.get("confidence", 0))
     grade = result.get("signal_grade", "WAIT")
-    danger = result.get("danger_level", "low")
-    dead_market = bool(result.get("dead_market", False))
     setup = _setup_direction(result)
 
     if signal in ["BUY", "SELL"]:
@@ -102,11 +129,22 @@ def _quality(result):
         return f"{signal} Weak"
 
     if setup in ["BUY", "SELL"]:
-        if dead_market:
-            return "WAIT Dead"
-        if danger == "high":
-            return f"{setup} Risky"
-        return f"{setup} Setup"
+        blocked, reason = _is_blocked_hard(result, setup)
+        if blocked:
+            return f"WAIT {reason}"
+
+        buy_quality = _safe_float(result.get("buy_quality_score", 0))
+        sell_quality = _safe_float(result.get("sell_quality_score", 0))
+        q = buy_quality if setup == "BUY" else sell_quality
+
+        if q >= 90:
+            return f"{setup} Setup A"
+        if q >= 78:
+            return f"{setup} Setup B"
+        if q >= 68:
+            return f"{setup} Setup C"
+
+        return "WAIT Weak"
 
     return "WAIT"
 
@@ -188,49 +226,62 @@ def _target(result):
 
 def _frame_score(frame, result):
     setup = _setup_direction(result)
-    confidence = _safe_float(result.get("confidence", 0))
     quality = _quality(result)
+    confidence = _safe_float(result.get("confidence", 0))
     weight = FRAME_WEIGHTS.get(frame, 1)
 
-    score = 0
+    if setup not in ["BUY", "SELL"]:
+        return 0
 
-    if setup in ["BUY", "SELL"]:
-        score += 20
+    if quality.startswith("WAIT"):
+        return 0
+
+    score = 10 + weight * 3
 
     if "Strong" in quality:
-        score += 30
+        score += 35
     elif "Medium" in quality:
+        score += 25
+    elif "Setup A" in quality:
+        score += 30
+    elif "Setup B" in quality:
         score += 20
-    elif "Setup" in quality:
-        score += 12
-    elif "Risky" in quality:
-        score += 5
+    elif "Setup C" in quality:
+        score += 10
+    elif "Weak" in quality:
+        score += 3
 
-    score += min(confidence, 100) * 0.3
-    score += weight * 3
+    score += min(confidence, 100) * 0.2
+
+    if result.get("danger_level") == "medium":
+        score -= 8
 
     if result.get("danger_level") == "high":
-        score -= 20
+        score -= 25
 
     if bool(result.get("dead_market", False)):
-        score -= 20
+        score -= 30
 
-    return round(score, 2)
+    return round(max(score, 0), 2)
 
 
 def _build_frame_payload(frame, result):
     setup = _setup_direction(result)
+    quality = _quality(result)
+
+    if quality.startswith("WAIT"):
+        setup = "WAIT"
 
     return {
         "timeframe": frame,
         "signal": result.get("signal", "WAIT"),
         "setup_direction": setup,
         "trend_direction": _trend_direction(result),
-        "quality": _quality(result),
+        "quality": quality,
         "confidence": result.get("confidence", 0),
-        "entry": _entry(result),
-        "sl": _sl(result),
-        "target": _target(result),
+        "entry": _entry(result) if setup in ["BUY", "SELL"] else 0,
+        "sl": _sl(result) if setup in ["BUY", "SELL"] else 0,
+        "target": _target(result) if setup in ["BUY", "SELL"] else 0,
         "tp1": result.get("tp1", 0),
         "tp2": result.get("tp2", 0),
         "tp3": result.get("tp3", 0),
@@ -248,11 +299,14 @@ def _build_frame_payload(frame, result):
 def _best_opportunity(frames):
     best = None
 
-    for frame, data in frames.items():
+    for _, data in frames.items():
         if data.get("setup_direction") not in ["BUY", "SELL"]:
             continue
 
         if data.get("entry", 0) <= 0:
+            continue
+
+        if data.get("score", 0) < 35:
             continue
 
         if best is None or data.get("score", 0) > best.get("score", 0):
@@ -262,6 +316,7 @@ def _best_opportunity(frames):
         return {
             "timeframe": "NONE",
             "signal": "WAIT",
+            "setup_direction": "WAIT",
             "quality": "No clear opportunity",
             "entry": 0,
             "sl": 0,
@@ -279,11 +334,15 @@ def _overall_bias(frames):
     for frame, data in frames.items():
         weight = FRAME_WEIGHTS.get(frame, 1)
         setup = data.get("setup_direction", "WAIT")
+        score = _safe_float(data.get("score", 0))
+
+        if score <= 0:
+            continue
 
         if setup == "BUY":
-            buy += weight
+            buy += weight + score / 20
         elif setup == "SELL":
-            sell += weight
+            sell += weight + score / 20
 
     if buy > sell + 2:
         return "BUY"
