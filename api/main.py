@@ -10,6 +10,7 @@ sys.path.append("C:/QuantProject/engine")
 
 from market_reader import analyze_market
 from multi_timeframe_engine import analyze_multi_timeframe
+from frame_reader import analyze_frame_reader
 from symbol_engine import get_symbol_info
 from time_sync import utc_now_iso
 from event_bus import emit_analyze_request, emit_engine_error, emit_user_connected
@@ -27,7 +28,7 @@ from performance_engine import build_performance_summary, reset_performance_reco
 
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="2.4.0"
+    version="2.5.0"
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -58,6 +59,12 @@ class AnalyzeMTFRequest(BaseModel):
     user_key: str = Field(..., min_length=3)
     symbol: str
     candles_by_timeframe: Dict[str, List[Candle]]
+
+
+class FrameReaderRequest(BaseModel):
+    user_key: str = Field(..., min_length=3)
+    symbol: str
+    frames: Dict[str, List[Candle]]
 
 
 class AdminRequest(BaseModel):
@@ -161,7 +168,7 @@ def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "time_utc": utc_now_iso()
     }
 
@@ -171,7 +178,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -183,7 +190,7 @@ def health():
 def old_signal():
     return {
         "status": "ok",
-        "message": "Use POST /analyze for real market reader",
+        "message": "Use POST /analyze or POST /frame-reader",
         "endpoint": "/analyze"
     }
 
@@ -200,7 +207,7 @@ def admin_system_status(data: AdminRequest):
 
     return {
         "status": "ok",
-        "api_version": "2.4.0",
+        "api_version": "2.5.0",
         "server_time_utc": utc_now_iso(),
         "files": {
             "settings_file_exists": CONFIG_FILE.exists(),
@@ -411,6 +418,97 @@ def admin_force_close_signal(data: ForceCloseSignalRequest):
         "performance": build_performance_summary(),
         "server_time_utc": utc_now_iso()
     }
+
+
+@app.post("/frame-reader")
+def frame_reader(data: FrameReaderRequest):
+    request_time = utc_now_iso()
+
+    users = load_users()
+
+    if data.user_key not in users:
+        return {
+            "status": "error",
+            "code": "INVALID_USER_KEY",
+            "message": "Invalid user key",
+            "server_time_utc": request_time
+        }
+
+    user = users[data.user_key]
+
+    if not user.get("active", False):
+        return {
+            "status": "error",
+            "code": "INACTIVE_USER",
+            "message": "User account is inactive",
+            "server_time_utc": request_time
+        }
+
+    frames = {}
+
+    for timeframe, candles in data.frames.items():
+        frames[timeframe.upper()] = [c.model_dump() for c in candles]
+
+    symbol_info = get_symbol_info(data.symbol)
+
+    try:
+        emit_user_connected(
+            user_key=data.user_key,
+            symbol=symbol_info["normalized_symbol"]
+        )
+
+        result = analyze_frame_reader(
+            symbol=symbol_info["normalized_symbol"],
+            frames=frames,
+            user_key=data.user_key
+        )
+
+        response = {
+            "status": "ok",
+            "user": user.get("name", "Unknown"),
+            "symbol": data.symbol,
+            "normalized_symbol": symbol_info["normalized_symbol"],
+            "asset_class": symbol_info["asset_class"],
+            "server_time_utc": request_time,
+            **result
+        }
+
+        write_market_log({
+            "event": "FRAME_READER_REQUEST",
+            "time_utc": request_time,
+            "user_key": data.user_key,
+            "user_name": user.get("name", "Unknown"),
+            "symbol": data.symbol,
+            "normalized_symbol": symbol_info["normalized_symbol"],
+            "asset_class": symbol_info["asset_class"],
+            "frames": list(frames.keys()),
+            "result": result
+        })
+
+        return response
+
+    except Exception as e:
+        emit_engine_error(
+            user_key=data.user_key,
+            symbol=data.symbol,
+            timeframe="FRAME_READER",
+            error=e
+        )
+
+        write_market_log({
+            "event": "FRAME_READER_ERROR",
+            "time_utc": request_time,
+            "user_key": data.user_key,
+            "symbol": data.symbol,
+            "error": str(e)
+        })
+
+        return {
+            "status": "error",
+            "code": "FRAME_READER_ERROR",
+            "message": str(e),
+            "server_time_utc": request_time
+        }
 
 
 @app.post("/analyze-mtf")
