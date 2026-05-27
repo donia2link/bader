@@ -45,3 +45,5 @@ docs/
 *_backup*.py
 *_backup*.mq5
 *_backup*.py
+data/
+*.docx
