@@ -5,22 +5,24 @@
 //| Reader only - no trading orders                                  |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.1"
-#property description "QuantBado Frame Reader - clean per timeframe panel - reader only"
+#property version   "1.2"
+#property description "QuantBado Frame Reader - trade style aware panel - reader only"
 
-input string InpServerUrl = "http://quantbado.online/frame-reader";
-input string InpUserKey   = "test123";
-input int    InpCandles   = 50;
-input int    InpTimerSec  = 20;
+input string InpServerUrl  = "http://quantbado.online/frame-reader";
+input string InpUserKey    = "test123";
+input string InpTradeStyle = "SCALP"; // SCALP, INTRADAY, SWING, ALL
 
-input bool   InpShowPanel = true;
-input bool   InpDrawLines = true;
+input int    InpCandles    = 50;
+input int    InpTimerSec   = 20;
 
-input int    InpPanelX    = 10;
-input int    InpPanelY    = 28;
-input int    InpLineBars  = 10;
+input bool   InpShowPanel  = true;
+input bool   InpDrawLines  = true;
 
-input string InpLineFrame = "BEST"; // BEST, M1, M5, M15, M30, H1, H4, D1
+input int    InpPanelX     = 10;
+input int    InpPanelY     = 28;
+input int    InpLineBars   = 10;
+
+input string InpLineFrame  = "BEST"; // BEST, M1, M5, M15, M30, H1, H4, D1
 
 string g_lastResponse = "";
 datetime g_lastRequestTime = 0;
@@ -32,9 +34,10 @@ int OnInit()
 {
    EventSetTimer(InpTimerSec);
 
-   Print("QuantBado Frame Reader EA v1.1 started.");
+   Print("QuantBado Frame Reader EA v1.2 started.");
    Print("Server URL: ", InpServerUrl);
    Print("Symbol: ", _Symbol);
+   Print("Trade Style: ", NormalizeTradeStyle(InpTradeStyle));
    Print("Reader only. No trading functions.");
 
    SendFrameReaderRequest();
@@ -81,6 +84,47 @@ void ClearObjects()
 }
 
 //+------------------------------------------------------------------+
+string NormalizeTradeStyle(string value)
+{
+   string style = value;
+   StringToUpper(style);
+
+   if(style == "SCALP")
+      return "SCALP";
+
+   if(style == "INTRADAY")
+      return "INTRADAY";
+
+   if(style == "SWING")
+      return "SWING";
+
+   if(style == "ALL")
+      return "ALL";
+
+   return "SCALP";
+}
+
+//+------------------------------------------------------------------+
+bool IsFrameInStyle(string tf, string style)
+{
+   style = NormalizeTradeStyle(style);
+
+   if(style == "ALL")
+      return true;
+
+   if(style == "SCALP")
+      return (tf == "M1" || tf == "M5" || tf == "M15");
+
+   if(style == "INTRADAY")
+      return (tf == "M15" || tf == "M30" || tf == "H1");
+
+   if(style == "SWING")
+      return (tf == "H4" || tf == "D1");
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
 string JsonEscape(string value)
 {
    StringReplace(value, "\\", "\\\\");
@@ -98,6 +142,7 @@ string TFToString(ENUM_TIMEFRAMES tf)
    if(tf == PERIOD_H1)  return "H1";
    if(tf == PERIOD_H4)  return "H4";
    if(tf == PERIOD_D1)  return "D1";
+
    return "UNKNOWN";
 }
 
@@ -156,9 +201,12 @@ bool BuildRequestBody(string &body)
       return false;
    }
 
+   string tradeStyle = NormalizeTradeStyle(InpTradeStyle);
+
    body = "{";
    body += "\"user_key\":\"" + JsonEscape(InpUserKey) + "\",";
    body += "\"symbol\":\"" + JsonEscape(_Symbol) + "\",";
+   body += "\"trade_style\":\"" + JsonEscape(tradeStyle) + "\",";
    body += "\"frames\":{";
    body += "\"M1\":"  + m1  + ",";
    body += "\"M5\":"  + m5  + ",";
@@ -266,15 +314,18 @@ string ExtractJsonString(string json, string key)
    return "";
 }
 
+//+------------------------------------------------------------------+
 double ExtractJsonDouble(string json, string key)
 {
    string v = ExtractJsonString(json, key);
+
    if(v == "")
       return 0.0;
 
    return StringToDouble(v);
 }
 
+//+------------------------------------------------------------------+
 string ExtractObject(string json, string key)
 {
    string pattern = "\"" + key + "\":{";
@@ -307,6 +358,7 @@ string ExtractObject(string json, string key)
    return "";
 }
 
+//+------------------------------------------------------------------+
 string ExtractFrameObject(string tf)
 {
    string frames = ExtractObject(g_lastResponse, "frames");
@@ -333,6 +385,7 @@ bool IsDarkChart()
    return brightness < 128;
 }
 
+//+------------------------------------------------------------------+
 color PanelBgColor()
 {
    if(IsDarkChart())
@@ -341,6 +394,7 @@ color PanelBgColor()
    return C'248,250,252';
 }
 
+//+------------------------------------------------------------------+
 color CardBgColor()
 {
    if(IsDarkChart())
@@ -349,6 +403,16 @@ color CardBgColor()
    return C'255,255,255';
 }
 
+//+------------------------------------------------------------------+
+color DisabledCardBgColor()
+{
+   if(IsDarkChart())
+      return C'20,20,20';
+
+   return C'242,242,242';
+}
+
+//+------------------------------------------------------------------+
 color PanelTextColor()
 {
    if(IsDarkChart())
@@ -357,6 +421,7 @@ color PanelTextColor()
    return C'15,23,42';
 }
 
+//+------------------------------------------------------------------+
 color MutedTextColor()
 {
    if(IsDarkChart())
@@ -365,31 +430,37 @@ color MutedTextColor()
    return C'75,85,99';
 }
 
+//+------------------------------------------------------------------+
 color BorderColor()
 {
    return C'37,99,235';
 }
 
+//+------------------------------------------------------------------+
 color HeaderColor()
 {
    return C'0,80,150';
 }
 
+//+------------------------------------------------------------------+
 color BuyColor()
 {
    return C'0,210,100';
 }
 
+//+------------------------------------------------------------------+
 color SellColor()
 {
    return C'230,57,70';
 }
 
+//+------------------------------------------------------------------+
 color WaitColor()
 {
    return C'245,158,11';
 }
 
+//+------------------------------------------------------------------+
 color SignalColor(string value)
 {
    if(value == "BUY" || StringFind(value, "BUY") >= 0 || value == "UP")
@@ -401,16 +472,19 @@ color SignalColor(string value)
    return WaitColor();
 }
 
+//+------------------------------------------------------------------+
 color EntryColor()
 {
    return C'0,145,255';
 }
 
+//+------------------------------------------------------------------+
 color SLColor()
 {
    return C'230,57,70';
 }
 
+//+------------------------------------------------------------------+
 color TPColor()
 {
    return C'0,170,85';
@@ -439,6 +513,7 @@ void CreateRect(string name, int x, int y, int w, int h, color bg, color border)
    ObjectSetInteger(0, obj, OBJPROP_HIDDEN, true);
 }
 
+//+------------------------------------------------------------------+
 void CreateLabel(string name, string text, int x, int y, color clr, int size = 9, bool bold = false)
 {
    string obj = PREFIX + name;
@@ -471,6 +546,7 @@ string CleanQuality(string q)
    return q;
 }
 
+//+------------------------------------------------------------------+
 bool IsTradableSetup(string setup, double entry, double score)
 {
    if(setup != "BUY" && setup != "SELL")
@@ -486,9 +562,21 @@ bool IsTradableSetup(string setup, double entry, double score)
 }
 
 //+------------------------------------------------------------------+
+string DisplayFrameState(string tf, string setup, double entry, double score, string style)
+{
+   if(!IsFrameInStyle(tf, style))
+      return "OFF";
+
+   if(IsTradableSetup(setup, entry, score))
+      return setup;
+
+   return "WAIT";
+}
+
+//+------------------------------------------------------------------+
 //| Panel rows                                                       |
 //+------------------------------------------------------------------+
-void DrawFrameBox(string tf, int x, int y, int w)
+void DrawFrameBox(string tf, int x, int y, int w, string style)
 {
    string obj = ExtractFrameObject(tf);
 
@@ -501,6 +589,8 @@ void DrawFrameBox(string tf, int x, int y, int w)
    double target = ExtractJsonDouble(obj, "target");
    double score = ExtractJsonDouble(obj, "score");
 
+   bool activeFrame = IsFrameInStyle(tf, style);
+
    if(setup == "")
       setup = "WAIT";
 
@@ -510,18 +600,29 @@ void DrawFrameBox(string tf, int x, int y, int w)
    if(quality == "")
       quality = "No Data";
 
-   bool tradable = IsTradableSetup(setup, entry, score);
+   bool tradable = activeFrame && IsTradableSetup(setup, entry, score);
 
+   color cardBg = activeFrame ? CardBgColor() : DisabledCardBgColor();
    color border = tradable ? SignalColor(setup) : MutedTextColor();
    color txt = PanelTextColor();
    color muted = MutedTextColor();
 
-   CreateRect("BOX_" + tf, x, y, w, 64, CardBgColor(), border);
+   CreateRect("BOX_" + tf, x, y, w, 64, cardBg, border);
 
-   CreateLabel("TF_" + tf, tf, x + 8, y + 6, tradable ? SignalColor(setup) : muted, 10, true);
-   CreateLabel("SETUP_" + tf, tradable ? setup : "WAIT", x + 45, y + 6, tradable ? SignalColor(setup) : WaitColor(), 9, true);
-   CreateLabel("TREND_" + tf, "Trend: " + trend, x + 112, y + 7, SignalColor(trend), 8, false);
+   string state = DisplayFrameState(tf, setup, entry, score, style);
+
+   CreateLabel("TF_" + tf, tf, x + 8, y + 6, activeFrame ? (tradable ? SignalColor(setup) : WaitColor()) : muted, 10, true);
+   CreateLabel("SETUP_" + tf, state, x + 45, y + 6, activeFrame ? SignalColor(state) : muted, 9, true);
+   CreateLabel("TREND_" + tf, "Trend: " + trend, x + 112, y + 7, activeFrame ? SignalColor(trend) : muted, 8, false);
    CreateLabel("SCORE_" + tf, "Score " + DoubleToString(score, 1), x + w - 70, y + 7, muted, 8, false);
+
+   if(!activeFrame)
+   {
+      CreateLabel("Q_" + tf, "Not in " + style, x + 8, y + 25, muted, 8, false);
+      CreateLabel("E_" + tf, "Entry: filtered out", x + 8, y + 43, muted, 8, false);
+      CreateLabel("T_" + tf, "TP / SL: --", x + 168, y + 43, muted, 8, false);
+      return;
+   }
 
    CreateLabel("Q_" + tf, CleanQuality(quality), x + 8, y + 25, tradable ? SignalColor(setup) : muted, 8, false);
 
@@ -544,15 +645,22 @@ void DrawPanel()
    int w = 330;
    int h = 548;
 
+   string style = NormalizeTradeStyle(InpTradeStyle);
+
    string bias = ExtractJsonString(g_lastResponse, "overall_bias");
    string version = ExtractJsonString(g_lastResponse, "reader_version");
+   string responseStyle = ExtractJsonString(g_lastResponse, "trade_style");
 
    string bestObj = ExtractObject(g_lastResponse, "best_opportunity");
    string bestTf = ExtractJsonString(bestObj, "timeframe");
    string bestSetup = ExtractJsonString(bestObj, "setup_direction");
    string bestQuality = ExtractJsonString(bestObj, "quality");
+
    double bestScore = ExtractJsonDouble(bestObj, "score");
    double bestEntry = ExtractJsonDouble(bestObj, "entry");
+
+   if(responseStyle != "")
+      style = responseStyle;
 
    if(bestSetup == "")
       bestSetup = ExtractJsonString(bestObj, "signal");
@@ -578,33 +686,34 @@ void DrawPanel()
    CreateLabel("TITLE", _Symbol + " Frame Reader", x + 12, y + 8, clrWhite, 12, true);
    CreateLabel("TIME", TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), x + 12, y + 31, clrWhite, 8, false);
 
-   CreateLabel("BIAS", "BIAS: " + bias, x + 195, y + 9, SignalColor(bias), 10, true);
-   CreateLabel("BEST", "Best: " + bestTf + " " + CleanQuality(bestQuality), x + 195, y + 31, clrWhite, 8, false);
+   CreateLabel("STYLE", style, x + 190, y + 7, clrWhite, 8, true);
+   CreateLabel("BIAS", "BIAS: " + bias, x + 240, y + 7, SignalColor(bias), 9, true);
+   CreateLabel("BEST", "Best: " + bestTf + " " + CleanQuality(bestQuality), x + 190, y + 31, clrWhite, 8, false);
 
    int rowY = y + 68;
    int rowW = w - 16;
 
-   DrawFrameBox("D1", x + 8, rowY, rowW);
+   DrawFrameBox("D1", x + 8, rowY, rowW, style);
    rowY += 68;
 
-   DrawFrameBox("H4", x + 8, rowY, rowW);
+   DrawFrameBox("H4", x + 8, rowY, rowW, style);
    rowY += 68;
 
-   DrawFrameBox("H1", x + 8, rowY, rowW);
+   DrawFrameBox("H1", x + 8, rowY, rowW, style);
    rowY += 68;
 
-   DrawFrameBox("M30", x + 8, rowY, rowW);
+   DrawFrameBox("M30", x + 8, rowY, rowW, style);
    rowY += 68;
 
-   DrawFrameBox("M15", x + 8, rowY, rowW);
+   DrawFrameBox("M15", x + 8, rowY, rowW, style);
    rowY += 68;
 
-   DrawFrameBox("M5", x + 8, rowY, rowW);
+   DrawFrameBox("M5", x + 8, rowY, rowW, style);
    rowY += 68;
 
-   DrawFrameBox("M1", x + 8, rowY, rowW);
+   DrawFrameBox("M1", x + 8, rowY, rowW, style);
 
-   CreateLabel("FOOT", version + " | Reader only | No orders", x + 12, y + h - 18, MutedTextColor(), 8, false);
+   CreateLabel("FOOT", version + " | " + style + " | Reader only", x + 12, y + h - 18, MutedTextColor(), 8, false);
 }
 
 //+------------------------------------------------------------------+
@@ -621,6 +730,7 @@ void DeleteTradeLines()
    }
 }
 
+//+------------------------------------------------------------------+
 string PickLineObject()
 {
    string wanted = InpLineFrame;
@@ -636,6 +746,7 @@ string PickLineObject()
    return ExtractObject(g_lastResponse, "best_opportunity");
 }
 
+//+------------------------------------------------------------------+
 void DrawShortLevel(string tag, double price, color clr, string label)
 {
    if(price <= 0)

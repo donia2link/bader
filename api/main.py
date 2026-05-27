@@ -26,9 +26,11 @@ from signal_store import (
 from performance_engine import build_performance_summary, reset_performance_records
 
 
+API_VERSION = "2.6.0"
+
 app = FastAPI(
     title="QuantBado Market Reader",
-    version="2.5.0"
+    version=API_VERSION
 )
 
 BASE_DIR = Path("C:/QuantProject")
@@ -38,6 +40,7 @@ LOGS_DIR = BASE_DIR / "logs"
 MARKET_LOG_FILE = LOGS_DIR / "market_logs.jsonl"
 
 FINAL_STATUSES = ["TP Hit", "TP1 Hit", "TP2 Hit", "TP3 Hit", "SL Hit", "Expired"]
+ALLOWED_TRADE_STYLES = ["SCALP", "INTRADAY", "SWING", "ALL"]
 
 
 class Candle(BaseModel):
@@ -65,6 +68,7 @@ class FrameReaderRequest(BaseModel):
     user_key: str = Field(..., min_length=3)
     symbol: str
     frames: Dict[str, List[Candle]]
+    trade_style: str = "SCALP"
 
 
 class AdminRequest(BaseModel):
@@ -92,6 +96,15 @@ class ForceCloseSignalRequest(BaseModel):
     symbol: str
     timeframe: str
     status: str = "TP1 Hit"
+
+
+def normalize_trade_style(value: str):
+    style = str(value or "SCALP").upper().strip()
+
+    if style not in ALLOWED_TRADE_STYLES:
+        return "SCALP"
+
+    return style
 
 
 def load_settings():
@@ -168,7 +181,7 @@ def home():
     return {
         "status": "online",
         "project": "QuantBado Market Reader",
-        "version": "2.5.0",
+        "version": API_VERSION,
         "time_utc": utc_now_iso()
     }
 
@@ -178,7 +191,7 @@ def health():
     return {
         "status": "healthy",
         "api": "online",
-        "version": "2.5.0",
+        "version": API_VERSION,
         "settings_file_exists": CONFIG_FILE.exists(),
         "users_file_exists": USERS_FILE.exists(),
         "logs_dir_exists": LOGS_DIR.exists(),
@@ -207,7 +220,7 @@ def admin_system_status(data: AdminRequest):
 
     return {
         "status": "ok",
-        "api_version": "2.5.0",
+        "api_version": API_VERSION,
         "server_time_utc": utc_now_iso(),
         "files": {
             "settings_file_exists": CONFIG_FILE.exists(),
@@ -450,6 +463,7 @@ def frame_reader(data: FrameReaderRequest):
         frames[timeframe.upper()] = [c.model_dump() for c in candles]
 
     symbol_info = get_symbol_info(data.symbol)
+    trade_style = normalize_trade_style(data.trade_style)
 
     try:
         emit_user_connected(
@@ -460,7 +474,8 @@ def frame_reader(data: FrameReaderRequest):
         result = analyze_frame_reader(
             symbol=symbol_info["normalized_symbol"],
             frames=frames,
-            user_key=data.user_key
+            user_key=data.user_key,
+            trade_style=trade_style
         )
 
         response = {
@@ -469,6 +484,7 @@ def frame_reader(data: FrameReaderRequest):
             "symbol": data.symbol,
             "normalized_symbol": symbol_info["normalized_symbol"],
             "asset_class": symbol_info["asset_class"],
+            "trade_style": trade_style,
             "server_time_utc": request_time,
             **result
         }
@@ -481,6 +497,7 @@ def frame_reader(data: FrameReaderRequest):
             "symbol": data.symbol,
             "normalized_symbol": symbol_info["normalized_symbol"],
             "asset_class": symbol_info["asset_class"],
+            "trade_style": trade_style,
             "frames": list(frames.keys()),
             "result": result
         })
@@ -500,6 +517,7 @@ def frame_reader(data: FrameReaderRequest):
             "time_utc": request_time,
             "user_key": data.user_key,
             "symbol": data.symbol,
+            "trade_style": trade_style,
             "error": str(e)
         })
 

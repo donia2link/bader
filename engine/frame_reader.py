@@ -1,9 +1,16 @@
 from market_reader import analyze_market
 
 
-FRAME_READER_VERSION = "frame_reader_v1.1"
+FRAME_READER_VERSION = "frame_reader_v1.2"
 
 DEFAULT_FRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+
+TRADE_STYLE_FRAMES = {
+    "SCALP": ["M1", "M5", "M15"],
+    "INTRADAY": ["M15", "M30", "H1"],
+    "SWING": ["H4", "D1"],
+    "ALL": ["M1", "M5", "M15", "M30", "H1", "H4", "D1"],
+}
 
 FRAME_WEIGHTS = {
     "M1": 1,
@@ -21,6 +28,17 @@ def _safe_float(value, default=0.0):
         return float(value)
     except Exception:
         return default
+
+
+def _normalize_trade_style(trade_style):
+    value = str(trade_style or "SCALP").upper().strip()
+    if value not in TRADE_STYLE_FRAMES:
+        return "SCALP"
+    return value
+
+
+def _allowed_frames(trade_style):
+    return TRADE_STYLE_FRAMES.get(_normalize_trade_style(trade_style), TRADE_STYLE_FRAMES["SCALP"])
 
 
 def _trend_direction(result):
@@ -265,12 +283,14 @@ def _frame_score(frame, result):
     return round(max(score, 0), 2)
 
 
-def _build_frame_payload(frame, result):
+def _build_frame_payload(frame, result, selected_frames):
     setup = _setup_direction(result)
     quality = _quality(result)
 
     if quality.startswith("WAIT"):
         setup = "WAIT"
+
+    in_trade_style = frame in selected_frames
 
     return {
         "timeframe": frame,
@@ -292,14 +312,18 @@ def _build_frame_payload(frame, result):
         "session_status": result.get("session_status", "unknown"),
         "danger_level": result.get("danger_level", "low"),
         "reason": result.get("reason", ""),
-        "score": _frame_score(frame, result),
+        "score": _frame_score(frame, result) if in_trade_style else 0,
+        "in_trade_style": in_trade_style,
     }
 
 
-def _best_opportunity(frames):
+def _best_opportunity(frames, selected_frames):
     best = None
 
-    for _, data in frames.items():
+    for frame, data in frames.items():
+        if frame not in selected_frames:
+            continue
+
         if data.get("setup_direction") not in ["BUY", "SELL"]:
             continue
 
@@ -327,11 +351,14 @@ def _best_opportunity(frames):
     return best
 
 
-def _overall_bias(frames):
+def _overall_bias(frames, selected_frames):
     buy = 0
     sell = 0
 
     for frame, data in frames.items():
+        if frame not in selected_frames:
+            continue
+
         weight = FRAME_WEIGHTS.get(frame, 1)
         setup = data.get("setup_direction", "WAIT")
         score = _safe_float(data.get("score", 0))
@@ -353,7 +380,10 @@ def _overall_bias(frames):
     return "NEUTRAL"
 
 
-def analyze_frame_reader(symbol, frames, user_key="unknown"):
+def analyze_frame_reader(symbol, frames, user_key="unknown", trade_style="SCALP"):
+    trade_style = _normalize_trade_style(trade_style)
+    selected_frames = _allowed_frames(trade_style)
+
     results = {}
     frame_payloads = {}
 
@@ -373,6 +403,7 @@ def analyze_frame_reader(symbol, frames, user_key="unknown"):
                 "target": 0,
                 "score": 0,
                 "reason": "No candles provided",
+                "in_trade_style": frame in selected_frames,
             }
             continue
 
@@ -384,14 +415,16 @@ def analyze_frame_reader(symbol, frames, user_key="unknown"):
         )
 
         results[frame] = result
-        frame_payloads[frame] = _build_frame_payload(frame, result)
+        frame_payloads[frame] = _build_frame_payload(frame, result, selected_frames)
 
-    best = _best_opportunity(frame_payloads)
-    bias = _overall_bias(frame_payloads)
+    best = _best_opportunity(frame_payloads, selected_frames)
+    bias = _overall_bias(frame_payloads, selected_frames)
 
     return {
         "status": "ok",
         "symbol": symbol,
+        "trade_style": trade_style,
+        "selected_frames": selected_frames,
         "overall_bias": bias,
         "best_opportunity": best,
         "frames": frame_payloads,
