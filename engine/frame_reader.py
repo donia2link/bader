@@ -1,7 +1,8 @@
 from market_reader import analyze_market
+from frame_signal_lifecycle import track_frame_signal
 
 
-FRAME_READER_VERSION = "frame_reader_v1.2"
+FRAME_READER_VERSION = "frame_reader_v1.3"
 
 DEFAULT_FRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
 
@@ -38,7 +39,10 @@ def _normalize_trade_style(trade_style):
 
 
 def _allowed_frames(trade_style):
-    return TRADE_STYLE_FRAMES.get(_normalize_trade_style(trade_style), TRADE_STYLE_FRAMES["SCALP"])
+    return TRADE_STYLE_FRAMES.get(
+        _normalize_trade_style(trade_style),
+        TRADE_STYLE_FRAMES["SCALP"]
+    )
 
 
 def _trend_direction(result):
@@ -117,13 +121,23 @@ def _is_blocked_hard(result, setup):
 
     if setup == "BUY":
         failed = result.get("buy_failed_blocks", [])
-        hard_blocks = {"not_near_resistance_zone", "not_near_resistance", "danger_ok", "session_ok"}
+        hard_blocks = {
+            "not_near_resistance_zone",
+            "not_near_resistance",
+            "danger_ok",
+            "session_ok",
+        }
         if len(set(failed).intersection(hard_blocks)) >= 2:
             return True, "BUY blocked"
 
     if setup == "SELL":
         failed = result.get("sell_failed_blocks", [])
-        hard_blocks = {"not_near_support_zone", "not_near_support", "danger_ok", "session_ok"}
+        hard_blocks = {
+            "not_near_support_zone",
+            "not_near_support",
+            "danger_ok",
+            "session_ok",
+        }
         if len(set(failed).intersection(hard_blocks)) >= 2:
             return True, "SELL blocked"
 
@@ -380,6 +394,68 @@ def _overall_bias(frames, selected_frames):
     return "NEUTRAL"
 
 
+def _current_price_from_frames(frames, selected_frames):
+    for frame in selected_frames:
+        data = frames.get(frame)
+        if not data:
+            continue
+
+        candles = data.get("candles")
+        if candles:
+            last = candles[-1]
+            price = _safe_float(last.get("close", 0))
+            if price > 0:
+                return price
+
+    return 0
+
+
+def _current_price_from_payloads(frame_payloads, selected_frames):
+    for frame in selected_frames:
+        data = frame_payloads.get(frame, {})
+        entry = _safe_float(data.get("entry", 0))
+        if entry > 0:
+            return entry
+
+    return 0
+
+
+def _build_tracked_response(tracked_signal):
+    if not tracked_signal or not tracked_signal.get("has_signal"):
+        return {
+            "has_signal": False,
+            "signal_status": "No Signal",
+            "signal": "WAIT",
+            "signal_id": "",
+            "timeframe": "NONE",
+            "entry": 0,
+            "sl": 0,
+            "target": 0,
+            "quality": "",
+            "score": 0,
+            "lifecycle_reason": "No valid frame signal to track",
+        }
+
+    return {
+        "has_signal": True,
+        "signal_id": tracked_signal.get("signal_id", ""),
+        "signal_status": tracked_signal.get("signal_status", "No Signal"),
+        "signal": tracked_signal.get("signal", "WAIT"),
+        "timeframe": tracked_signal.get("timeframe", "NONE"),
+        "quality": tracked_signal.get("quality", ""),
+        "confidence": tracked_signal.get("confidence", 0),
+        "score": tracked_signal.get("score", 0),
+        "entry": tracked_signal.get("entry", 0),
+        "sl": tracked_signal.get("sl", 0),
+        "target": tracked_signal.get("target", 0),
+        "created_at": tracked_signal.get("created_at", ""),
+        "updated_at": tracked_signal.get("updated_at", ""),
+        "expires_at": tracked_signal.get("expires_at", ""),
+        "lifecycle_reason": tracked_signal.get("lifecycle_reason", ""),
+        "lifecycle_version": tracked_signal.get("lifecycle_version", ""),
+    }
+
+
 def analyze_frame_reader(symbol, frames, user_key="unknown", trade_style="SCALP"):
     trade_style = _normalize_trade_style(trade_style)
     selected_frames = _allowed_frames(trade_style)
@@ -420,6 +496,19 @@ def analyze_frame_reader(symbol, frames, user_key="unknown", trade_style="SCALP"
     best = _best_opportunity(frame_payloads, selected_frames)
     bias = _overall_bias(frame_payloads, selected_frames)
 
+    current_price = _current_price_from_payloads(frame_payloads, selected_frames)
+
+    tracked_signal = track_frame_signal(
+        user_key=user_key,
+        symbol=symbol,
+        trade_style=trade_style,
+        best_opportunity=best,
+        current_price=current_price,
+        ttl_minutes=60
+    )
+
+    tracked = _build_tracked_response(tracked_signal)
+
     return {
         "status": "ok",
         "symbol": symbol,
@@ -427,6 +516,10 @@ def analyze_frame_reader(symbol, frames, user_key="unknown", trade_style="SCALP"
         "selected_frames": selected_frames,
         "overall_bias": bias,
         "best_opportunity": best,
+        "tracked_signal": tracked,
+        "tracked_entry": tracked.get("entry", 0),
+        "tracked_sl": tracked.get("sl", 0),
+        "tracked_target": tracked.get("target", 0),
         "frames": frame_payloads,
         "raw_results": results,
         "reader_version": FRAME_READER_VERSION,

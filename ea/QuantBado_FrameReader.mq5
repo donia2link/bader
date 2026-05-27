@@ -5,8 +5,8 @@
 //| Reader only - no trading orders                                  |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.2"
-#property description "QuantBado Frame Reader - trade style aware panel - reader only"
+#property version   "1.3"
+#property description "QuantBado Frame Reader - tracked signal lifecycle panel - reader only"
 
 input string InpServerUrl  = "http://quantbado.online/frame-reader";
 input string InpUserKey    = "test123";
@@ -22,7 +22,7 @@ input int    InpPanelX     = 10;
 input int    InpPanelY     = 28;
 input int    InpLineBars   = 10;
 
-input string InpLineFrame  = "BEST"; // BEST, M1, M5, M15, M30, H1, H4, D1
+input string InpLineSource = "TRACKED"; // TRACKED, BEST
 
 string g_lastResponse = "";
 datetime g_lastRequestTime = 0;
@@ -34,10 +34,11 @@ int OnInit()
 {
    EventSetTimer(InpTimerSec);
 
-   Print("QuantBado Frame Reader EA v1.2 started.");
+   Print("QuantBado Frame Reader EA v1.3 started.");
    Print("Server URL: ", InpServerUrl);
    Print("Symbol: ", _Symbol);
    Print("Trade Style: ", NormalizeTradeStyle(InpTradeStyle));
+   Print("Line Source: ", NormalizeLineSource(InpLineSource));
    Print("Reader only. No trading functions.");
 
    SendFrameReaderRequest();
@@ -102,6 +103,18 @@ string NormalizeTradeStyle(string value)
       return "ALL";
 
    return "SCALP";
+}
+
+//+------------------------------------------------------------------+
+string NormalizeLineSource(string value)
+{
+   string source = value;
+   StringToUpper(source);
+
+   if(source == "BEST")
+      return "BEST";
+
+   return "TRACKED";
 }
 
 //+------------------------------------------------------------------+
@@ -326,6 +339,15 @@ double ExtractJsonDouble(string json, string key)
 }
 
 //+------------------------------------------------------------------+
+bool ExtractJsonBool(string json, string key)
+{
+   string v = ExtractJsonString(json, key);
+   StringToLower(v);
+
+   return (v == "true" || v == "1");
+}
+
+//+------------------------------------------------------------------+
 string ExtractObject(string json, string key)
 {
    string pattern = "\"" + key + "\":{";
@@ -367,6 +389,12 @@ string ExtractFrameObject(string tf)
       return "";
 
    return ExtractObject(frames, tf);
+}
+
+//+------------------------------------------------------------------+
+string ExtractTrackedSignalObject()
+{
+   return ExtractObject(g_lastResponse, "tracked_signal");
 }
 
 //+------------------------------------------------------------------+
@@ -461,6 +489,12 @@ color WaitColor()
 }
 
 //+------------------------------------------------------------------+
+color ActiveColor()
+{
+   return C'0,180,255';
+}
+
+//+------------------------------------------------------------------+
 color SignalColor(string value)
 {
    if(value == "BUY" || StringFind(value, "BUY") >= 0 || value == "UP")
@@ -468,6 +502,9 @@ color SignalColor(string value)
 
    if(value == "SELL" || StringFind(value, "SELL") >= 0 || value == "DOWN")
       return SellColor();
+
+   if(value == "Active")
+      return ActiveColor();
 
    return WaitColor();
 }
@@ -562,6 +599,29 @@ bool IsTradableSetup(string setup, double entry, double score)
 }
 
 //+------------------------------------------------------------------+
+bool IsActiveTrackedSignal(string obj)
+{
+   bool hasSignal = ExtractJsonBool(obj, "has_signal");
+   string status = ExtractJsonString(obj, "signal_status");
+   string signal = ExtractJsonString(obj, "signal");
+   double entry = ExtractJsonDouble(obj, "entry");
+
+   if(!hasSignal)
+      return false;
+
+   if(status != "Active")
+      return false;
+
+   if(signal != "BUY" && signal != "SELL")
+      return false;
+
+   if(entry <= 0)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
 string DisplayFrameState(string tf, string setup, double entry, double score, string style)
 {
    if(!IsFrameInStyle(tf, style))
@@ -643,7 +703,7 @@ void DrawPanel()
    int x = InpPanelX;
    int y = InpPanelY;
    int w = 330;
-   int h = 548;
+   int h = 570;
 
    string style = NormalizeTradeStyle(InpTradeStyle);
 
@@ -655,9 +715,15 @@ void DrawPanel()
    string bestTf = ExtractJsonString(bestObj, "timeframe");
    string bestSetup = ExtractJsonString(bestObj, "setup_direction");
    string bestQuality = ExtractJsonString(bestObj, "quality");
-
    double bestScore = ExtractJsonDouble(bestObj, "score");
    double bestEntry = ExtractJsonDouble(bestObj, "entry");
+
+   string trackedObj = ExtractTrackedSignalObject();
+   bool trackedActive = IsActiveTrackedSignal(trackedObj);
+   string trackedTf = ExtractJsonString(trackedObj, "timeframe");
+   string trackedSignal = ExtractJsonString(trackedObj, "signal");
+   string trackedStatus = ExtractJsonString(trackedObj, "signal_status");
+   string trackedQuality = ExtractJsonString(trackedObj, "quality");
 
    if(responseStyle != "")
       style = responseStyle;
@@ -680,17 +746,27 @@ void DrawPanel()
       bestSetup = "WAIT";
    }
 
+   if(!trackedActive)
+   {
+      trackedTf = "NONE";
+      trackedSignal = "WAIT";
+      trackedStatus = "No Signal";
+      trackedQuality = "";
+   }
+
    CreateRect("MAIN_BG", x, y, w, h, PanelBgColor(), BorderColor());
-   CreateRect("HEADER", x, y, w, 58, HeaderColor(), HeaderColor());
+   CreateRect("HEADER", x, y, w, 75, HeaderColor(), HeaderColor());
 
    CreateLabel("TITLE", _Symbol + " Frame Reader", x + 12, y + 8, clrWhite, 12, true);
    CreateLabel("TIME", TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), x + 12, y + 31, clrWhite, 8, false);
 
    CreateLabel("STYLE", style, x + 190, y + 7, clrWhite, 8, true);
    CreateLabel("BIAS", "BIAS: " + bias, x + 240, y + 7, SignalColor(bias), 9, true);
+
+   CreateLabel("TRACKED", "Tracked: " + trackedTf + " " + trackedSignal + " " + trackedStatus, x + 12, y + 53, SignalColor(trackedSignal), 8, true);
    CreateLabel("BEST", "Best: " + bestTf + " " + CleanQuality(bestQuality), x + 190, y + 31, clrWhite, 8, false);
 
-   int rowY = y + 68;
+   int rowY = y + 85;
    int rowW = w - 16;
 
    DrawFrameBox("D1", x + 8, rowY, rowW, style);
@@ -713,7 +789,7 @@ void DrawPanel()
 
    DrawFrameBox("M1", x + 8, rowY, rowW, style);
 
-   CreateLabel("FOOT", version + " | " + style + " | Reader only", x + 12, y + h - 18, MutedTextColor(), 8, false);
+   CreateLabel("FOOT", version + " | " + style + " | Lines: " + NormalizeLineSource(InpLineSource), x + 12, y + h - 18, MutedTextColor(), 8, false);
 }
 
 //+------------------------------------------------------------------+
@@ -733,15 +809,10 @@ void DeleteTradeLines()
 //+------------------------------------------------------------------+
 string PickLineObject()
 {
-   string wanted = InpLineFrame;
+   string source = NormalizeLineSource(InpLineSource);
 
-   if(wanted == "BEST")
-      return ExtractObject(g_lastResponse, "best_opportunity");
-
-   string tfObj = ExtractFrameObject(wanted);
-
-   if(tfObj != "")
-      return tfObj;
+   if(source == "TRACKED")
+      return ExtractTrackedSignalObject();
 
    return ExtractObject(g_lastResponse, "best_opportunity");
 }
@@ -798,6 +869,7 @@ void DrawTradeLines()
 
    string setup = ExtractJsonString(obj, "setup_direction");
    string signal = ExtractJsonString(obj, "signal");
+   string status = ExtractJsonString(obj, "signal_status");
 
    double entry = ExtractJsonDouble(obj, "entry");
    double sl = ExtractJsonDouble(obj, "sl");
@@ -807,10 +879,33 @@ void DrawTradeLines()
    if(setup == "")
       setup = signal;
 
-   if(!IsTradableSetup(setup, entry, score))
+   if(NormalizeLineSource(InpLineSource) == "TRACKED")
    {
-      DeleteTradeLines();
-      return;
+      if(status != "Active")
+      {
+         DeleteTradeLines();
+         return;
+      }
+
+      if(setup != "BUY" && setup != "SELL")
+      {
+         DeleteTradeLines();
+         return;
+      }
+
+      if(entry <= 0 || sl <= 0 || target <= 0)
+      {
+         DeleteTradeLines();
+         return;
+      }
+   }
+   else
+   {
+      if(!IsTradableSetup(setup, entry, score))
+      {
+         DeleteTradeLines();
+         return;
+      }
    }
 
    DrawShortLevel("ENTRY", entry, EntryColor(), "ENTRY");
