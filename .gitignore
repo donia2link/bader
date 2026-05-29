@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+venv/
+data/
+*.db
+access_config.json
+telegram_config.json
+*.pem
+*.key
+*.crt
+*.pfx
+logs/
