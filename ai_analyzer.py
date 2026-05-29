@@ -1,170 +1,294 @@
 def sma(values, period):
     if len(values) < period:
-        return sum(values) / max(len(values), 1)
+        return sum(values) / len(values)
     return sum(values[-period:]) / period
-
-
-def safe_float(value, default=None):
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except Exception:
-        return default
-
-
-def round_price(value, digits=5):
-    try:
-        if value is None:
-            return None
-        return round(float(value), digits)
-    except Exception:
-        return value
-
-
-def safe_slice(data, limit=300):
-    if not isinstance(data, list):
-        return []
-    return data[-limit:]
-
-
-def estimate_category(symbol: str) -> str:
-    s = (symbol or "").upper()
-    forex_codes = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "TRY"]
-    crypto = ["BTC", "ETH", "XRP", "SOL", "DOGE", "LTC", "ADA", "BNB"]
-    commodities = ["XAU", "XAG", "XPT", "XPD", "OIL", "BRENT", "CRUDE", "WTI", "NATGAS", "GAS", "COPPER", "WHEAT", "CORN", "COFFEE", "SUGAR", "COTTON", "COCOA", "SOY", "ALUMIN", "NICKEL", "LEAD"]
-    indices = ["US30", "US100", "NAS100", "USTEC", "US500", "SPX", "GER", "DAX", "UK100", "JP225", "HK50", "FRA40", "AUS200"]
-    if any(x in s for x in crypto):
-        return "crypto"
-    if any(x in s for x in commodities):
-        return "commodity"
-    if any(x in s for x in indices):
-        return "index"
-    found = [c for c in forex_codes if c in s]
-    if len(found) >= 2:
-        return "forex"
-    return "other"
 
 
 def calc_rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50.0
-    gains, losses = [], []
+
+    gains = []
+    losses = []
+
     for i in range(-period, 0):
-        diff = closes[i] - closes[i - 1]
-        if diff >= 0:
-            gains.append(diff)
+        change = closes[i] - closes[i - 1]
+        if change > 0:
+            gains.append(change)
             losses.append(0)
         else:
             gains.append(0)
-            losses.append(abs(diff))
+            losses.append(abs(change))
+
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period
+
     if avg_loss == 0:
         return 100.0
+
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 
-def calc_atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1:
+def avg_range(highs, lows, period=14):
+    count = min(period, len(highs), len(lows))
+    if count <= 0:
         return 0.0
-    trs = []
-    for i in range(-period, 0):
-        high = highs[i]
-        low = lows[i]
-        prev_close = closes[i - 1]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        trs.append(tr)
-    return sum(trs) / len(trs)
+
+    ranges = []
+    for i in range(-count, 0):
+        ranges.append(highs[i] - lows[i])
+
+    return sum(ranges) / len(ranges)
 
 
-def detect_rejection(candles):
-    if not candles:
-        return (False, False, "")
-    c = candles[-1]
-    o = safe_float(c.get("open"), 0)
-    h = safe_float(c.get("high"), 0)
-    l = safe_float(c.get("low"), 0)
-    close = safe_float(c.get("close"), 0)
-    rng = max(h - l, 1e-9)
-    body = abs(close - o)
-    upper = h - max(o, close)
-    lower = min(o, close) - l
-    reject_support = lower > body * 1.5 and lower > rng * 0.35
-    reject_resistance = upper > body * 1.5 and upper > rng * 0.35
-    note = "support rejection" if reject_support else "resistance rejection" if reject_resistance else ""
-    return reject_support, reject_resistance, note
+def analyze_market(data: dict) -> dict:
+    symbol = data.get("symbol", "")
+    timeframe = data.get("timeframe", "")
+    candles = data.get("candles", [])
+    # Use the actual current price from MT5 if provided.
+    # Some EAs send price as 0 or with too few decimals; in that case use the latest candle close.
+    try:
+        price = float(data.get("price", 0) or 0)
+    except Exception:
+        price = 0.0
 
+    if len(candles) < 50:
+        return {
+            "status": "error",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "signal": "WAIT",
+            "confidence": 0,
+            "reason": "Not enough candles. Need at least 50 candles."
+        }
 
-def build_targets(signal, entry, atr, support, resistance, category):
-    """Dynamic SL/TP built around ATR and current price. Returns TP1..TP5."""
-    if entry is None or atr is None or atr <= 0:
-        return None, None, None, None, None, None
+    opens = [float(c["open"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    closes = [float(c["close"]) for c in candles]
 
-    min_dist_factor = {
-        "forex": 0.9,
-        "commodity": 1.1,
-        "index": 1.0,
-        "crypto": 1.2,
-        "other": 1.0,
-    }.get(category, 1.0)
-    dist = max(float(atr) * min_dist_factor, abs(float(entry)) * 0.00035)
+    last_open = opens[-1]
+    last_high = highs[-1]
+    last_low = lows[-1]
+    last_close = closes[-1]
 
-    if signal == "BUY":
-        sl = entry - dist
-        if support is not None and support < entry:
-            sl = min(sl, support - dist * 0.20)
-        tp1 = entry + dist * 1.15
-        tp2 = entry + dist * 1.75
-        tp3 = entry + dist * 2.35
-        tp4 = entry + dist * 3.00
-        tp5 = entry + dist * 3.75
-    elif signal == "SELL":
-        sl = entry + dist
-        if resistance is not None and resistance > entry:
-            sl = max(sl, resistance + dist * 0.20)
-        tp1 = entry - dist * 1.15
-        tp2 = entry - dist * 1.75
-        tp3 = entry - dist * 2.35
-        tp4 = entry - dist * 3.00
-        tp5 = entry - dist * 3.75
-    else:
-        return None, None, None, None, None, None
+    if price <= 0:
+        price = last_close
 
-    return (
-        round_price(sl),
-        round_price(tp1),
-        round_price(tp2),
-        round_price(tp3),
-        round_price(tp4),
-        round_price(tp5),
+    prev_open = opens[-2]
+    prev_close = closes[-2]
+
+    ma9 = sma(closes, 9)
+    ma21 = sma(closes, 21)
+    ma50 = sma(closes, 50)
+
+    rsi = calc_rsi(closes, 14)
+    atr = avg_range(highs, lows, 14)
+
+    support = min(lows[-15:])
+    resistance = max(highs[-15:])
+
+    recent_high = max(highs[-6:-1])
+    recent_low = min(lows[-6:-1])
+
+    body = abs(last_close - last_open)
+    candle_range = max(last_high - last_low, 0.01)
+
+    upper_wick = last_high - max(last_open, last_close)
+    lower_wick = min(last_open, last_close) - last_low
+
+    bullish_candle = last_close > last_open
+    bearish_candle = last_close < last_open
+
+    strong_body = body >= candle_range * 0.45
+
+    trend_up = last_close > ma21 and ma9 > ma21 and ma21 >= ma50
+    trend_down = last_close < ma21 and ma9 < ma21 and ma21 <= ma50
+
+    momentum_up = last_close > prev_close and rsi >= 55
+    momentum_down = last_close < prev_close and rsi <= 45
+
+    breakout_buy = last_close > recent_high and trend_up and momentum_up
+    breakdown_sell = last_close < recent_low and trend_down and momentum_down
+
+    reject_resistance = (
+        last_high >= resistance - max(atr * 0.25, 0.5)
+        and upper_wick > body * 1.2
+        and bearish_candle
+        and rsi < 60
     )
 
+    reject_support = (
+        last_low <= support + max(atr * 0.25, 0.5)
+        and lower_wick > body * 1.2
+        and bullish_candle
+        and rsi > 40
+    )
 
-def build_quality(signal, confidence, entry, sl, tp1, atr, score_buy, score_sell, rsi,
-                  breakout_buy, breakdown_sell, reject_support, reject_resistance,
-                  ma21_break_up, ma21_break_down):
-    warnings = []
-    signal = (signal or "WAIT").upper()
-    confidence = safe_float(confidence, 0) or 0
-    atr = safe_float(atr, 0) or 0
-    score_buy = safe_float(score_buy, 0) or 0
-    score_sell = safe_float(score_sell, 0) or 0
-    rsi = safe_float(rsi, 50) or 50
+    ma21_break_down = prev_close >= ma21 and last_close < ma21 and bearish_candle
+    ma21_break_up = prev_close <= ma21 and last_close > ma21 and bullish_candle
 
+    signal = "WAIT"
+    confidence = 45
+    reason = "No clean scalp setup. Market is mixed or inside range."
+
+    # Keep broker decimals, but avoid ugly float tails.
+    current_price = round(price, 5)
+    entry = current_price
+    sl = None
+    tp1 = None
+    tp2 = None
+    tp3 = None
+    tp4 = None
+    tp5 = None
+
+    score_buy = 0
+    score_sell = 0
+    reasons_buy = []
+    reasons_sell = []
+
+    if trend_up:
+        score_buy += 20
+        reasons_buy.append("trend above MA21")
+
+    if trend_down:
+        score_sell += 20
+        reasons_sell.append("trend below MA21")
+
+    if momentum_up:
+        score_buy += 20
+        reasons_buy.append("RSI bullish momentum")
+
+    if momentum_down:
+        score_sell += 20
+        reasons_sell.append("RSI bearish momentum")
+
+    if breakout_buy:
+        score_buy += 25
+        reasons_buy.append("breakout above recent high")
+
+    if breakdown_sell:
+        score_sell += 25
+        reasons_sell.append("breakdown below recent low")
+
+    if reject_support:
+        score_buy += 20
+        reasons_buy.append("support rejection")
+
+    if reject_resistance:
+        score_sell += 20
+        reasons_sell.append("resistance rejection")
+
+    if ma21_break_up:
+        score_buy += 15
+        reasons_buy.append("MA21 reclaim")
+
+    if ma21_break_down:
+        score_sell += 15
+        reasons_sell.append("MA21 break down")
+
+    if strong_body and bullish_candle:
+        score_buy += 10
+        reasons_buy.append("strong bullish candle")
+
+    if strong_body and bearish_candle:
+        score_sell += 10
+        reasons_sell.append("strong bearish candle")
+
+    # Dynamic distance. Old fixed 1.2 was breaking low-price symbols such as EURCAD.
+    # Example: EURCAD entry 1.61 with TP1 0.41 was caused by subtracting 1.2.
+    min_distance = max(atr, price * 0.0015)
+    min_distance = max(min_distance, price * 0.0005)
+
+    # Dynamic SL buffer. Never use a fixed 0.7 for all symbols; it breaks low-price FX pairs.
+    sl_buffer = max(atr * 0.35, price * 0.0008)
+
+    if score_buy >= 60 and score_buy > score_sell + 10:
+        signal = "BUY"
+        confidence = min(90, score_buy)
+
+        sl_price = min(support, last_low) - sl_buffer
+        tp1_price = entry + min_distance
+        tp2_price = entry + min_distance * 2
+        tp3_price = entry + min_distance * 3
+        tp4_price = entry + min_distance * 4
+        tp5_price = entry + min_distance * 5
+
+        sl = round(sl_price, 5)
+        tp1 = round(tp1_price, 5)
+        tp2 = round(tp2_price, 5)
+        tp3 = round(tp3_price, 5)
+        tp4 = round(tp4_price, 5)
+        tp5 = round(tp5_price, 5)
+
+        reason = "BUY: " + ", ".join(reasons_buy[:4])
+
+    elif score_sell >= 60 and score_sell > score_buy + 10:
+        signal = "SELL"
+        confidence = min(90, score_sell)
+
+        sl_price = max(resistance, last_high) + sl_buffer
+        tp1_price = entry - min_distance
+        tp2_price = entry - min_distance * 2
+        tp3_price = entry - min_distance * 3
+        tp4_price = entry - min_distance * 4
+        tp5_price = entry - min_distance * 5
+
+        sl = round(sl_price, 5)
+        tp1 = round(tp1_price, 5)
+        tp2 = round(tp2_price, 5)
+        tp3 = round(tp3_price, 5)
+        tp4 = round(tp4_price, 5)
+        tp5 = round(tp5_price, 5)
+
+        reason = "SELL: " + ", ".join(reasons_sell[:4])
+
+    # Safety guard: if SL/TP is mathematically wrong, hide the levels instead of showing bad prices.
+    if signal == "BUY":
+        if sl is not None and sl >= entry:
+            sl = None
+        if tp1 is not None and tp1 <= entry:
+            tp1 = None
+        if tp2 is not None and tp2 <= entry:
+            tp2 = None
+        if tp3 is not None and tp3 <= entry:
+            tp3 = None
+        if tp4 is not None and tp4 <= entry:
+            tp4 = None
+        if tp5 is not None and tp5 <= entry:
+            tp5 = None
+    elif signal == "SELL":
+        if sl is not None and sl <= entry:
+            sl = None
+        if tp1 is not None and tp1 >= entry:
+            tp1 = None
+        if tp2 is not None and tp2 >= entry:
+            tp2 = None
+        if tp3 is not None and tp3 >= entry:
+            tp3 = None
+        if tp4 is not None and tp4 >= entry:
+            tp4 = None
+        if tp5 is not None and tp5 >= entry:
+            tp5 = None
+
+    # V23 Signal Quality Engine: evaluate setup quality independently from raw direction score.
     risk_reward = None
-    if signal == "BUY" and entry is not None and sl is not None and tp1 is not None:
-        risk = float(entry) - float(sl)
-        reward = float(tp1) - float(entry)
-        if risk > 0 and reward > 0:
-            risk_reward = round(reward / risk, 2)
-    elif signal == "SELL" and entry is not None and sl is not None and tp1 is not None:
-        risk = float(sl) - float(entry)
-        reward = float(entry) - float(tp1)
-        if risk > 0 and reward > 0:
-            risk_reward = round(reward / risk, 2)
+    try:
+        if signal == "BUY" and entry is not None and sl is not None and tp1 is not None:
+            risk = float(entry) - float(sl)
+            reward = float(tp1) - float(entry)
+            if risk > 0 and reward > 0:
+                risk_reward = round(reward / risk, 2)
+        elif signal == "SELL" and entry is not None and sl is not None and tp1 is not None:
+            risk = float(sl) - float(entry)
+            reward = float(entry) - float(tp1)
+            if risk > 0 and reward > 0:
+                risk_reward = round(reward / risk, 2)
+    except Exception:
+        risk_reward = None
 
+    warnings = []
     if signal == "WAIT":
         warnings.append("No actionable setup")
     if signal in ["BUY", "SELL"] and (sl is None or tp1 is None):
@@ -191,25 +315,27 @@ def build_quality(signal, confidence, entry, sl, tp1, atr, score_buy, score_sell
     else:
         setup_type = "momentum_setup"
 
-    quality_score = confidence
+    quality_score = float(confidence or 0)
     if signal == "WAIT":
-        quality_score = min(45, confidence)
-    if risk_reward is not None and risk_reward >= 1.5:
-        quality_score += 8
-    if risk_reward is not None and risk_reward >= 2.0:
-        quality_score += 5
-    if risk_reward is not None and risk_reward < 1.0:
-        quality_score -= 12
-    if setup_type in ["trend_breakout", "trend_breakdown"]:
-        quality_score += 8
-    if setup_type == "rejection":
-        quality_score += 5
-    if "Risk levels incomplete" in warnings:
-        quality_score -= 20
-    if "Mixed directional scores" in warnings:
-        quality_score -= 10
-    if "Momentum may be stretched" in warnings:
-        quality_score -= 6
+        quality_score = min(45, quality_score)
+    else:
+        if risk_reward is not None:
+            if risk_reward >= 1.5:
+                quality_score += 8
+            if risk_reward >= 2.0:
+                quality_score += 5
+            if risk_reward < 1.0:
+                quality_score -= 12
+        if setup_type in ["trend_breakout", "trend_breakdown"]:
+            quality_score += 8
+        if setup_type == "rejection":
+            quality_score += 5
+        if "Risk levels incomplete" in warnings:
+            quality_score -= 20
+        if "Mixed directional scores" in warnings:
+            quality_score -= 10
+        if "Momentum may be stretched" in warnings:
+            quality_score -= 6
 
     quality_score = round(max(0, min(100, quality_score)), 2)
     if quality_score >= 80:
@@ -223,182 +349,33 @@ def build_quality(signal, confidence, entry, sl, tp1, atr, score_buy, score_sell
     else:
         quality_label = "D"
 
-    return quality_score, quality_label, setup_type, risk_reward, warnings
-
-
-def analyze_market(data):
-    symbol = data.get("symbol", "UNKNOWN")
-    timeframe = data.get("timeframe", data.get("tf", "M1"))
-    category = data.get("category") or estimate_category(symbol)
-    candles = safe_slice(data.get("candles") or data.get("rates") or [], 400)
-
-    if len(candles) < 30:
-        return {
-            "status": "ok",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "category": category,
-            "signal": "WAIT",
-            "confidence": 0,
-            "reason": "Not enough candle data",
-            "quality_score": 0,
-            "quality_label": "D",
-            "setup_type": "range_wait",
-            "risk_reward": None,
-            "warnings": ["No actionable setup", "ATR unavailable"],
-        }
-
-    opens = [safe_float(c.get("open"), 0) for c in candles]
-    highs = [safe_float(c.get("high"), 0) for c in candles]
-    lows = [safe_float(c.get("low"), 0) for c in candles]
-    closes = [safe_float(c.get("close"), 0) for c in candles]
-
-    current_price = safe_float(data.get("current_price"), None)
-    if current_price is None:
-        current_price = safe_float(data.get("bid"), None)
-    if current_price is None:
-        current_price = safe_float(data.get("ask"), None)
-    if current_price is None:
-        current_price = closes[-1]
-
-    ma9 = sma(closes, 9)
-    ma21 = sma(closes, 21)
-    ma50 = sma(closes, 50)
-    rsi = calc_rsi(closes, 14)
-    atr = calc_atr(highs, lows, closes, 14)
-
-    recent_high = max(highs[-12:-1]) if len(highs) >= 13 else max(highs)
-    recent_low = min(lows[-12:-1]) if len(lows) >= 13 else min(lows)
-    support = min(lows[-25:])
-    resistance = max(highs[-25:])
-
-    last_close = closes[-1]
-    prev_close = closes[-2]
-    last_open = opens[-1]
-
-    bullish_candle = last_close > last_open
-    bearish_candle = last_close < last_open
-    trend_up = last_close > ma21 > ma50 or (last_close > ma21 and ma9 > ma21)
-    trend_down = last_close < ma21 < ma50 or (last_close < ma21 and ma9 < ma21)
-    momentum_up = rsi > 54
-    momentum_down = rsi < 46
-    breakout_buy = last_close > recent_high and bullish_candle
-    breakdown_sell = last_close < recent_low and bearish_candle
-    ma21_break_up = prev_close <= ma21 and last_close > ma21
-    ma21_break_down = prev_close >= ma21 and last_close < ma21
-    reject_support, reject_resistance, rejection_note = detect_rejection(candles)
-
-    buy_score = 0
-    sell_score = 0
-
-    if trend_up:
-        buy_score += 24
-    if trend_down:
-        sell_score += 24
-    if momentum_up:
-        buy_score += 16
-    if momentum_down:
-        sell_score += 16
-    if breakout_buy:
-        buy_score += 22
-    if breakdown_sell:
-        sell_score += 22
-    if ma21_break_up:
-        buy_score += 10
-    if ma21_break_down:
-        sell_score += 10
-    if reject_support:
-        buy_score += 12
-    if reject_resistance:
-        sell_score += 12
-    if bullish_candle:
-        buy_score += 6
-    if bearish_candle:
-        sell_score += 6
-
-    confidence = max(buy_score, sell_score)
-    score_gap = abs(buy_score - sell_score)
-
-    signal = "WAIT"
-    reason = "No clean scalp setup. Market is mixed or inside range."
-    if buy_score >= 58 and buy_score >= sell_score + 12:
-        signal = "BUY"
-        reason = "BUY: trend above MA21, RSI bullish momentum"
-        if breakout_buy:
-            reason += ", breakout above recent high"
-        if reject_support:
-            reason += ", support rejection"
-        if ma21_break_up:
-            reason += ", MA21 reclaim"
-    elif sell_score >= 58 and sell_score >= buy_score + 12:
-        signal = "SELL"
-        reason = "SELL: trend below MA21, RSI bearish momentum"
-        if breakdown_sell:
-            reason += ", breakdown below recent low"
-        if reject_resistance:
-            reason += ", resistance rejection"
-        if ma21_break_down:
-            reason += ", MA21 rejection"
-
-    if score_gap < 12 and signal != "WAIT":
-        signal = "WAIT"
-        reason = "Directional scores are mixed. Waiting for cleaner confirmation."
-
-    entry = current_price
-    sl, tp1, tp2, tp3, tp4, tp5 = build_targets(signal, entry, atr, support, resistance, category)
-
-    # Final protection: never show invalid targets.
-    if signal == "BUY":
-        if sl is None or tp1 is None or not (sl < entry < tp1):
-            sl = tp1 = tp2 = tp3 = tp4 = tp5 = None
-    elif signal == "SELL":
-        if sl is None or tp1 is None or not (tp1 < entry < sl):
-            sl = tp1 = tp2 = tp3 = tp4 = tp5 = None
-    else:
-        sl = tp1 = tp2 = tp3 = tp4 = tp5 = None
-
-    quality_score, quality_label, setup_type, risk_reward, warnings = build_quality(
-        signal, confidence, entry, sl, tp1, atr, buy_score, sell_score, rsi,
-        breakout_buy, breakdown_sell, reject_support, reject_resistance,
-        ma21_break_up, ma21_break_down
-    )
-
     return {
         "status": "ok",
         "symbol": symbol,
         "timeframe": timeframe,
-        "category": category,
         "signal": signal,
-        "confidence": round_price(confidence, 2),
-        "quality_score": quality_score,
-        "quality_label": quality_label,
-        "setup_type": setup_type,
-        "risk_reward": risk_reward,
-        "warnings": warnings,
-        "current_price": round_price(current_price, 5),
-        "entry": round_price(entry, 5),
+        "confidence": confidence,
+        "current_price": current_price,
+        "entry": entry,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
         "tp4": tp4,
         "tp5": tp5,
-        "support": round_price(support, 5),
-        "resistance": round_price(resistance, 5),
-        "rsi": round_price(rsi, 2),
-        "ma9": round_price(ma9, 5),
-        "ma21": round_price(ma21, 5),
-        "ma50": round_price(ma50, 5),
-        "atr": round_price(atr, 5),
-        "buy_score": round_price(buy_score, 2),
-        "sell_score": round_price(sell_score, 2),
-        "trend": "UP" if trend_up else "DOWN" if trend_down else "SIDEWAYS",
-        "momentum_direction": "UP" if momentum_up else "DOWN" if momentum_down else "NEUTRAL",
-        "reason": reason,
-        "score_breakdown": {
-            "buy_score": round_price(buy_score, 2),
-            "sell_score": round_price(sell_score, 2),
-            "gap": round_price(score_gap, 2),
-        },
-        "notes": "Market reader v25 targets quality",
+        "support": round(support, 5),
+        "resistance": round(resistance, 5),
+        "ma9": round(ma9, 5),
+        "ma21": round(ma21, 5),
+        "ma50": round(ma50, 5),
+        "rsi": round(rsi, 2),
+        "atr": round(atr, 5),
+        "buy_score": score_buy,
+        "sell_score": score_sell,
+        "quality_score": quality_score,
+        "quality_label": quality_label,
+        "setup_type": setup_type,
+        "risk_reward": risk_reward,
+        "warnings": warnings,
+        "reason": reason
     }
