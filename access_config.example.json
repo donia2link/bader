@@ -1,0 +1,42 @@
+{
+  "enabled": true,
+  "plans": {
+    "owner": {
+      "features": ["mobile", "dashboard", "performance", "history", "admin"],
+      "allowed_symbols": ["*"],
+      "allowed_timeframes": ["*"],
+      "max_symbols": 0
+    },
+    "pro": {
+      "features": ["mobile", "dashboard", "performance", "history"],
+      "allowed_symbols": ["*"],
+      "allowed_timeframes": ["M1", "M5", "M15", "H1", "H4", "D1"],
+      "max_symbols": 0
+    },
+    "basic": {
+      "features": ["mobile", "history"],
+      "allowed_symbols": ["XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY"],
+      "allowed_timeframes": ["M5", "M15", "H1"],
+      "max_symbols": 10
+    },
+    "trial": {
+      "features": ["mobile"],
+      "allowed_symbols": ["XAUUSD"],
+      "allowed_timeframes": ["M5"],
+      "max_symbols": 1
+    }
+  },
+  "users": [
+    {
+      "name": "Owner",
+      "key": "CHANGE_THIS_OWNER_KEY",
+      "plan": "owner",
+      "enabled": true,
+      "expires_at": "",
+      "allowed_symbols": ["*"],
+      "allowed_timeframes": ["*"],
+      "max_symbols": 0,
+      "features": ["*"]
+    }
+  ]
+}
