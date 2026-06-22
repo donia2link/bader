@@ -1,7 +1,7 @@
-#property strict
+﻿#property strict
 #property version   "1.01"
 
-input string API_URL  = "http://quantbado.online/analyze";
+input string API_URL  = "http://api.quantbado.online/analyze";
 input string USER_KEY = "test123";
 input int    CandlesToSend = 50;
 input int    UpdateSeconds = 5;
@@ -246,3 +246,4 @@ void DrawDashboard(string signal, string strength, string trend, string momentum
 
    DrawLabel("QB_Notes", "Notes: " + notes, 18, 285, 9, clrSilver);
 }
+

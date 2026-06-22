@@ -199,35 +199,109 @@ def _last_price_from_results(results, entry_tf):
     return 0
 
 
+def _trend_direction(result):
+    trend = result.get("trend", "range")
+    momentum_direction = result.get("momentum_direction", "flat")
+    structure = result.get("structure", "mixed_structure")
+
+    buy_points = 0
+    sell_points = 0
+
+    if trend == "bullish":
+        buy_points += 2
+    elif trend == "bearish":
+        sell_points += 2
+
+    if momentum_direction == "up":
+        buy_points += 1
+    elif momentum_direction == "down":
+        sell_points += 1
+
+    if structure == "bullish_structure":
+        buy_points += 1
+    elif structure == "bearish_structure":
+        sell_points += 1
+
+    if buy_points > sell_points:
+        return "UP"
+
+    if sell_points > buy_points:
+        return "DOWN"
+
+    return "FLAT"
+
+
+def _setup_direction(result):
+    signal = result.get("signal", "WAIT")
+    trend_dir = _trend_direction(result)
+
+    buy_quality = _safe_float(result.get("buy_quality_score", 0))
+    sell_quality = _safe_float(result.get("sell_quality_score", 0))
+
+    if signal == "BUY":
+        return "BUY"
+
+    if signal == "SELL":
+        return "SELL"
+
+    if buy_quality >= sell_quality + 8:
+        return "BUY"
+
+    if sell_quality >= buy_quality + 8:
+        return "SELL"
+
+    if trend_dir == "UP":
+        return "BUY"
+
+    if trend_dir == "DOWN":
+        return "SELL"
+
+    return "WAIT"
+
+
 def _quality_from_result(result):
     signal = result.get("signal", "WAIT")
     confidence = _safe_float(result.get("confidence", 0))
     grade = result.get("signal_grade", "WAIT")
+    setup = _setup_direction(result)
 
-    if signal not in ["BUY", "SELL"]:
-        return "No Trade"
+    if signal in ["BUY", "SELL"]:
+        if "Strong" in grade or confidence >= 85:
+            return f"{signal} Strong"
 
-    if "Strong" in grade or confidence >= 85:
-        return f"{signal} Strong"
+        if confidence >= 65:
+            return f"{signal} Medium"
 
-    if confidence >= 65:
-        return f"{signal} Medium"
+        return f"{signal} Weak"
 
-    return f"{signal} Weak"
+    if setup in ["BUY", "SELL"]:
+        danger = result.get("danger_level", "low")
+        dead_market = bool(result.get("dead_market", False))
+        blocked = result.get("blocked_reasons", [])
+
+        if dead_market:
+            return "WAIT Dead"
+
+        if danger == "high":
+            return f"{setup} Risky"
+
+        if blocked:
+            return f"{setup} Blocked"
+
+        return f"{setup} Setup"
+
+    return "WAIT"
 
 
 def _preferred_target(result):
-    """
-    For compact panel display.
-    Shows a practical target based on available levels.
-    """
     signal = result.get("signal", "WAIT")
+    setup = _setup_direction(result)
 
     tp1 = _safe_float(result.get("tp1", 0))
     tp2 = _safe_float(result.get("tp2", 0))
     tp3 = _safe_float(result.get("tp3", 0))
 
-    if signal not in ["BUY", "SELL"]:
+    if signal not in ["BUY", "SELL"] and setup not in ["BUY", "SELL"]:
         return 0
 
     if tp2 > 0:
@@ -237,6 +311,68 @@ def _preferred_target(result):
         return tp1
 
     return tp3
+
+
+def _setup_entry(result):
+    entry = _safe_float(result.get("entry", 0))
+    if entry > 0:
+        return entry
+
+    support = _safe_float(result.get("support", 0))
+    resistance = _safe_float(result.get("resistance", 0))
+
+    if support > 0 and resistance > 0:
+        return round((support + resistance) / 2, 5)
+
+    return 0
+
+
+def _setup_sl(result):
+    sl = _safe_float(result.get("sl", 0))
+    if sl > 0:
+        return sl
+
+    setup = _setup_direction(result)
+    entry = _setup_entry(result)
+    atr = _safe_float(result.get("atr", 0))
+
+    if entry <= 0:
+        return 0
+
+    if atr <= 0:
+        atr = max(entry * 0.0008, 0.00001)
+
+    if setup == "BUY":
+        return round(entry - atr, 5)
+
+    if setup == "SELL":
+        return round(entry + atr, 5)
+
+    return 0
+
+
+def _setup_target(result):
+    target = _preferred_target(result)
+    if target > 0:
+        return target
+
+    setup = _setup_direction(result)
+    entry = _setup_entry(result)
+    atr = _safe_float(result.get("atr", 0))
+
+    if entry <= 0:
+        return 0
+
+    if atr <= 0:
+        atr = max(entry * 0.0008, 0.00001)
+
+    if setup == "BUY":
+        return round(entry + atr, 5)
+
+    if setup == "SELL":
+        return round(entry - atr, 5)
+
+    return 0
 
 
 def _build_individual_signals(results):
@@ -251,6 +387,7 @@ def _build_individual_signals(results):
                 "signal": "WAIT",
                 "trend": "unknown",
                 "trend_direction": "FLAT",
+                "setup_direction": "WAIT",
                 "quality": "No Data",
                 "confidence": 0,
                 "entry": 0,
@@ -264,28 +401,26 @@ def _build_individual_signals(results):
             }
             continue
 
-        trend = r.get("trend", "range")
-        momentum_direction = r.get("momentum_direction", "flat")
+        setup = _setup_direction(r)
 
-        trend_direction = "FLAT"
-        if trend == "bullish" or momentum_direction == "up":
-            trend_direction = "UP"
-        elif trend == "bearish" or momentum_direction == "down":
-            trend_direction = "DOWN"
+        entry = _setup_entry(r)
+        sl = _setup_sl(r)
+        target = _setup_target(r)
 
         output[tf] = {
             "timeframe": tf,
             "signal": r.get("signal", "WAIT"),
-            "trend": trend,
-            "trend_direction": trend_direction,
+            "trend": r.get("trend", "range"),
+            "trend_direction": _trend_direction(r),
+            "setup_direction": setup,
             "quality": _quality_from_result(r),
             "confidence": r.get("confidence", 0),
-            "entry": r.get("entry", 0),
-            "sl": r.get("sl", 0),
+            "entry": entry,
+            "sl": sl,
             "tp1": r.get("tp1", 0),
             "tp2": r.get("tp2", 0),
             "tp3": r.get("tp3", 0),
-            "target": _preferred_target(r),
+            "target": target,
             "signal_grade": r.get("signal_grade", "WAIT"),
             "reason": r.get("reason", "")
         }
@@ -312,16 +447,17 @@ def _build_wait_response(symbol, results, direction_score, individual_signals, r
             "signal_id": "",
             "lifecycle_reason": reason
         },
-        "mtf_version": "multi_timeframe_engine_v0.4"
+        "mtf_version": "multi_timeframe_engine_v0.5"
     }
 
 
 def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
     """
-    QuantBado Multi-Timeframe Engine v0.4
+    QuantBado Multi-Timeframe Engine v0.5
 
     - Analyzes M1/M5/M15/H1/H4.
-    - Returns individual_signals for each timeframe.
+    - Returns individual timeframe opportunities.
+    - Uses Setup labels even when final signal is WAIT.
     - Keeps combined MTF signal lifecycle using timeframe key: MTF.
     """
 
@@ -344,7 +480,7 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
         return {
             "status": "error",
             "message": "No timeframe candle data provided",
-            "mtf_version": "multi_timeframe_engine_v0.4"
+            "mtf_version": "multi_timeframe_engine_v0.5"
         }
 
     direction_score = _score_direction(results)
@@ -407,7 +543,7 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
             "signal_lifecycle": lifecycle,
             "timeframe_results": results,
             "direction_details": direction_score["details"],
-            "mtf_version": "multi_timeframe_engine_v0.4"
+            "mtf_version": "multi_timeframe_engine_v0.5"
         }
 
     if final_signal == "WAIT":
@@ -485,5 +621,5 @@ def analyze_multi_timeframe(symbol, candles_by_timeframe, user_key="unknown"):
         "signal_lifecycle": lifecycle,
         "timeframe_results": results,
         "direction_details": direction_score["details"],
-        "mtf_version": "multi_timeframe_engine_v0.4"
+        "mtf_version": "multi_timeframe_engine_v0.5"
     }

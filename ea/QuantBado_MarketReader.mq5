@@ -1,6 +1,6 @@
-#property strict
+﻿#property strict
 
-input string API_URL  = "http://quantbado.online/analyze";
+input string API_URL  = "http://api.quantbado.online/analyze";
 input string USER_KEY = "QB-USER-001";
 input int CandlesToSend = 50;
 input int UpdateSeconds = 5;

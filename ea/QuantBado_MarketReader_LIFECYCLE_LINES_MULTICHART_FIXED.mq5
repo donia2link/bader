@@ -1,7 +1,7 @@
-#property strict
+﻿#property strict
 #property version   "1.30"
 
-input string API_URL  = "http://quantbado.online/analyze";
+input string API_URL  = "http://api.quantbado.online/analyze";
 input string USER_KEY = "test123";
 input int    CandlesToSend = 50;
 input int    UpdateSeconds = 5;
@@ -491,3 +491,4 @@ void DrawDashboard(
    DrawLabel("Notes", "Notes: " + notes, 18, 430, 9, clrSilver);
    DrawLabel("LifeReason", "Reason: " + Shorten(lifecycleReason, 48), 18, 450, 9, clrSilver);
 }
+
